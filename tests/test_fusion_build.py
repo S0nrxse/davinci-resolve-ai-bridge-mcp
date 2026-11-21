@@ -54,6 +54,29 @@ class CustomStageTests(unittest.TestCase):
         self.assertEqual(comp.FindTool("Soft_Haze").GetInput("XBlurSize"), 4)
         self.assertEqual(comp.locks, 0)
 
+    def test_chain_is_inferred_from_from_links(self):
+        # The agent's call that used to fail: a Merge wired only with {"from": ...}, no chain.
+        op, comp, item = make(user_nodes=("Glow",))
+        result = op._op_fusion_build({"item_id": item, "name": "Tint", "nodes": [
+            {"name": "Col", "type": "Background"},
+            {"name": "Over", "type": "Merge", "inputs": {"Background": {"from": "chain"}, "Foreground": {"from": "Col"},
+                                                        "Blend": 0.5}}]})
+        over = comp.FindTool("Tint_Over")
+        self.assertIn("Over is the only node", result["chain_inferred"])
+        self.assertIs(over.inputs["Background"].source.tool, comp.FindTool("Glow1"))
+        self.assertIs(over.inputs["Foreground"].source.tool, comp.FindTool("Tint_Col"))
+        self.assertIs(comp.FindTool("MediaOut1").FindMainInput(1).GetConnectedOutput().tool, over)
+        self.assertTrue(result["verified"])
+        self.assertEqual((comp.locks, comp.undo_depth, comp.undo_groups), (0, 0, 1))
+
+    def test_ambiguous_graph_still_needs_a_chain(self):
+        op, comp, item = make()
+        before = [t.Name for t in comp.tools]
+        with self.assertRaisesRegex(OperationError, "A, B all are"):
+            op._op_fusion_build({"item_id": item, "name": "X", "nodes": [
+                {"name": "A", "type": "Blur"}, {"name": "B", "type": "Glow"}]})
+        self.assertEqual([t.Name for t in comp.tools], before)
+
     def test_custom_stages_run_in_name_order(self):
         op, comp, item = make()
         for name in ("B", "A"):

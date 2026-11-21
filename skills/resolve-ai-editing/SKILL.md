@@ -312,7 +312,9 @@ whisper.cpp instead; nothing is uploaded.
 - `list_media(query=..., kind="clips")` finds one file without paging through every bin and timeline.
 - `measure_loudness(target_lufs=-14)`: per-clip and program LUFS with the gain each clip needs. Read-only by default;
   `apply=true` (ask first) sets each clip's volume to its gain and reports before/after. Source audio, so the gain is
-  the absolute clip volume to use, and track faders still apply: confirm with render_check.
+  the absolute clip volume to use, and track faders still apply: confirm with render_check. For dialogue use
+  `gate="speech"`: clips without real dialogue (b-roll, room tone) are left alone instead of boosted +30 dB. If
+  `ok` is false after apply, trust `applied.read_back`, not the gains. `scope="track", track_index=N` is fastest.
 - `detect_shots(threshold=0.3, mark=False)`: camera cuts inside long recordings, as timeline frames.
 - `detect_beats(mark="downbeats")`: tempo, beats and bars of a music clip for cutting on the beat.
 - `animated_captions(style="pop"|"karaoke"|"minimal")`: word-highlight captions rendered natively as a transparent

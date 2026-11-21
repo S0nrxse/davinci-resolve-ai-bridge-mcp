@@ -139,6 +139,16 @@ class ClipVolumeTests(unittest.TestCase):
         with self.assertRaisesRegex(OperationError, "between"):
             op._op_set_clip_volume({"item_ids": [audio.uid], "db": 40})
 
+    def test_read_clip_volumes_is_read_only_and_maps_video_to_audio(self):
+        video, audio = pair(0, 100, 0, "talk")
+        audio.props["AudioVolume"] = 4.5
+        op = ResolveOperations(lambda: Resolve(Project([video, audio])))
+        out = op.dispatch("read_clip_volumes", {"item_ids": [video.uid, "missing"]})
+        self.assertEqual(out["clips"][0]["requested_for"], video.uid)
+        self.assertEqual((out["clips"][0]["item"], out["clips"][0]["db"]), (audio.uid, 4.5))
+        self.assertIn("error", out["clips"][1])
+        self.assertEqual(audio.props["AudioVolume"], 4.5)
+
     def test_unread_volume_is_not_claimed(self):
         video, audio = pair(0, 100, 0, "talk")
         audio.SetProperty = lambda key, value: True  # returns True, stores nothing

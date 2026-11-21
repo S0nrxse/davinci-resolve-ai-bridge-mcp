@@ -1489,6 +1489,21 @@ def render_status(job_id: str = "") -> str:
     return _result("render_status", {"job_id": job_id})
 
 
+def _observe_for_render(call: Any) -> Any:
+    """A render check edits nothing it does not put back (Deliver settings, marks, page, its own job and file),
+    so it may look at Resolve itself instead of being refused after a bridge or worker restart. One read-only
+    current_context call records this client's observation; the result names the timeline that was rendered."""
+    try:
+        context = call("current_context", {}, 30.0)
+    except Exception:
+        return None  # The render's own call reports any real problem.
+    if not isinstance(context, dict):
+        return None
+    timeline = context.get("timeline")
+    return {"project": context.get("project"),
+            "timeline": timeline.get("name") if isinstance(timeline, dict) else timeline}
+
+
 @mcp.tool()
 def render_check(start_frame: Optional[int] = None, end_frame: Optional[int] = None, width: int = 640,
                  mark: bool = False, keep_file: bool = False) -> str:
@@ -1511,12 +1526,14 @@ def render_check(start_frame: Optional[int] = None, end_frame: Optional[int] = N
         payload, used["transport"] = transport.call(operation, params, timeout=min(timeout, 590.0))
         return payload
 
+    observed = _observe_for_render(call)
     try:
         result = qc.run_check(call, _ffmpeg(), Path(client.HOME) / "renders" / "check", start_frame=start_frame,
                               end_frame=end_frame, width=width, mark=mark, keep_file=keep_file)
     except Exception as exc:
         return json.dumps({"ok": False, "error": "%s: %s" % (type(exc).__name__, exc)}, indent=2)
     result["transport"] = used.get("transport")
+    result["rendered_from"] = observed
     return json.dumps(result, ensure_ascii=False, indent=1)
 
 
@@ -1531,7 +1548,9 @@ def render_frames(frames: Optional[list[int]] = None, start_frame: Optional[int]
     spaced frames. This RENDERS (a few seconds to a minute per span of up to 20 s; far-apart frames make
     several small renders), so ask the user first. Deliver settings and In/Out marks are saved and restored
     and the temporary jobs and files removed; if `settings_restored` is false tell the user to check the
-    Deliver page and In/Out marks. Frames are H.264-compressed and at most `width` px wide.
+    Deliver page and In/Out marks. Resolve is put back on the page it was on. It looks at Resolve itself first
+    (no timeline_overview needed after a restart); rendered_from names the timeline it rendered.
+    Frames are H.264-compressed and at most `width` px wide.
     sheet (default on) returns ONE contact-sheet image instead: tiles in timeline order, left to right then
     top to bottom (`columns` across, default about square), each labelled with its timecode and absolute
     frame; grey tiles were not rendered. Set sheet=false for one full-size image per frame.
@@ -1543,6 +1562,7 @@ def render_frames(frames: Optional[list[int]] = None, start_frame: Optional[int]
         payload, used["transport"] = transport.call(operation, params, timeout=min(timeout, 590.0))
         return payload
 
+    observed = _observe_for_render(call)
     try:
         result = qc.render_frames(call, _ffmpeg(), Path(client.HOME) / "renders" / "check" / "frames", frames=frames,
                                   start_frame=start_frame, end_frame=end_frame, count=count, width=width,
@@ -1558,6 +1578,7 @@ def render_frames(frames: Optional[list[int]] = None, start_frame: Optional[int]
         if data:
             images.append(ImageContent(type="image", data=data, mimeType="image/png"))
     result["transport"] = used.get("transport")
+    result["rendered_from"] = observed
     return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=1))] + images
 
 
@@ -1573,7 +1594,7 @@ def _transcripts(item_id: Optional[str], scope: str, track_index: Optional[int],
         params["item_id"] = item_id
     if track_index:
         params["track_index"] = track_index
-    payload, used = transport.call("transcription_source", params, timeout=60.0)
+    payload, used = transport.call("transcription_source", params, timeout=300.0)
     ffmpeg = ResolveOperations._ffmpeg_path(client.HOME)
     results = [transcribe.transcribe_source(src, client.HOME, language=language or "auto", prompt=prompt, ffmpeg=ffmpeg)
                for src in payload["sources"]]
@@ -1938,7 +1959,8 @@ def speech_regions(scope: str = "clip", item_id: Optional[str] = None, track_ind
 
 @mcp.tool()
 def measure_loudness(scope: str = "timeline", item_id: Optional[str] = None, track_index: Optional[int] = None,
-                     target_lufs: float = -14.0, true_peak_ceiling_db: float = -1.0, apply: bool = False) -> str:
+                     target_lufs: float = -14.0, true_peak_ceiling_db: float = -1.0, apply: bool = False,
+                     gate: str = "none") -> str:
     """Read-only loudness check: integrated LUFS, loudness range and true peak per clip and for the whole
     program (clips back to back), plus the dB change each needs to reach target_lufs (-14 YouTube/Spotify,
     -16 Apple/podcasts, -23 EBU broadcast), limited so true peak stays under true_peak_ceiling_db.
@@ -1947,7 +1969,12 @@ def measure_loudness(scope: str = "timeline", item_id: Optional[str] = None, tra
     volume that reaches the target. apply=True (ask first) sets each measured clip's volume to that gain with
     set_clip_volume (the peak-limited gain where the ceiling applies; clips that couldn't be measured are left
     alone) and reports before/after per clip. Track faders and effects still change the final mix: confirm with
-    render_check.
+    render_check. If the write fails, volumes are read back and ok is false; never assume they changed.
+    gate="speech" (use it for dialogue): loudness is measured over dialogue-level sound only, with one threshold for
+    the whole programme, so pauses and room tone don't drag a clip's number down; a clip with under 1 s of dialogue
+    (40% of a shorter clip; b-roll, a laptop beat) is left unmeasured and gets no gain instead of a huge boost of room noise. True peak is
+    still the whole clip's. Each clip reports integrated_lufs (gated) and integrated_lufs_all.
+    scope="track" with track_index is the fastest scan.
     """
     from bridge import audio_regions
     params: dict[str, Any] = {"scope": scope}
@@ -1955,10 +1982,11 @@ def measure_loudness(scope: str = "timeline", item_id: Optional[str] = None, tra
         params["item_id"] = item_id
     if track_index:
         params["track_index"] = track_index
+    params["fingerprint"] = False  # Loudness never compares timelines; skipping it saves ~a third of the scan.
     try:
-        payload, used = transport.call("transcription_source", params, timeout=60.0)
+        payload, used = transport.call("transcription_source", params, timeout=300.0)
         result = audio_regions.measure_loudness(payload["sources"], _ffmpeg(), target_lufs=target_lufs,
-                                                true_peak_ceiling_db=true_peak_ceiling_db)
+                                                true_peak_ceiling_db=true_peak_ceiling_db, gate=gate)
     except client.BridgeOffline as exc:
         return json.dumps({"ok": False, "error": str(exc), "help": transport.offline_help()}, indent=2)
     except Exception as exc:
@@ -1973,17 +2001,41 @@ def measure_loudness(scope: str = "timeline", item_id: Optional[str] = None, tra
                 if db != round(float(gain), 1):
                     capped.append({"item_id": clip["item_id"], "wanted_db": round(float(gain), 1), "set_db": db})
                 items.append({"item_id": clip["item_id"], "db": db})
+        ok = True
         if items:
-            applied = json.loads(_result("set_clip_volume", {"items": items}, timeout=120.0))
-            result["applied"] = applied.get("result") if applied.get("ok") else {"error": applied.get("error")}
-            result["note"] = ("Clip volumes were set to the gains above (Inspector > Audio > Volume) and read back; see "
-                              "applied.clips for before/after. Track faders and effects are unchanged.")
+            applied = json.loads(_result("set_clip_volume", {"items": items}, timeout=180.0))
+            done = applied.get("result") if applied.get("ok") else None
+            if isinstance(done, dict) and done.get("verified"):
+                result["applied"] = done
+                result["note"] = ("Clip volumes were set to the gains above (Inspector > Audio > Volume) and read back; "
+                                  "see applied.clips for before/after. Track faders and effects are unchanged.")
+            else:
+                # Never report success without a read-back: a transport failure leaves the outcome unknown.
+                ok = False
+                wanted = {entry["item_id"]: entry["db"] for entry in items}
+                check = json.loads(_result("read_clip_volumes", {"item_ids": list(wanted)}, timeout=180.0))
+                read_back = (check.get("result") or {}).get("clips") if check.get("ok") else None
+                result["applied"] = {"verified": False, "error": None if done else applied.get("error"),
+                                     "clips": (done or {}).get("clips"), "read_back": read_back}
+                if read_back is None:
+                    result["note"] = ("Setting clip volumes FAILED (%s) and they could not be read back (%s): the outcome "
+                                      "is unknown. Read the volumes (timeline_overview detail='full') before retrying."
+                                      % (applied.get("error") or "not verified", check.get("error")))
+                else:
+                    at_target = [c for c in read_back if c.get("db") is not None and c.get("requested_for") in wanted
+                                 and abs(float(c["db"]) - wanted[c["requested_for"]]) <= 0.05]
+                    result["applied"]["at_target"] = len(at_target)
+                    result["note"] = ("Setting clip volumes FAILED or did not verify (%s). Read back now: %d of %d audio "
+                                      "item(s) are at the wanted volume (applied.read_back). Set the rest with "
+                                      "set_clip_volume and read them back." % (applied.get("error") or "see applied.clips",
+                                                                               len(at_target), len(read_back)))
             if capped:
                 result["capped"] = capped
                 result["note"] += (" %d clip(s) needed more than Resolve's +24 dB clip volume and were capped, so they "
                                    "stay below the target: raise the track fader or fix the source." % len(capped))
         else:
             result["applied"] = {"clips": [], "note": "No clip had a measurable gain; nothing was changed."}
+        return json.dumps({"ok": ok, "transport": used, "result": result}, ensure_ascii=False, indent=1)
     return json.dumps({"ok": True, "transport": used, "result": result}, ensure_ascii=False, indent=1)
 
 
@@ -2115,8 +2167,10 @@ def add_transitions(cuts: Any = "all", duration_frames: Optional[int] = None, au
     reads the layout back. Refuses timelines it can't represent safely: anything beyond one video track with its
     own audio on A1, titles/generators/compound clips, retimed clips, subtitles, mismatched frame rate or start.
     audio_fades=True also writes fade in/out per clip into the FCPXML, but that is UNVERIFIED (it did not survive
-    a re-export in testing): check it. dry_run=True returns the plan. Ask first; then look at the dissolves with
-    render_frames.
+    a re-export in testing): check it. Audio stays a hard cut under each dissolve: Resolve 21.2 Free drops audio
+    transitions on FCPXML import (live-tested), so tell the user to add audio crossfades by hand (select the audio
+    edit points, Timeline > Add Audio Only Transition). dry_run=True returns the plan. Ask first; then look at the
+    dissolves with render_frames.
     """
     params: dict[str, Any] = {"cuts": cuts, "audio_fades": audio_fades, "dry_run": dry_run, "bin": bin}
     if duration_frames is not None:
@@ -2527,7 +2581,7 @@ def gaming_cleanup(preset: str = "youtube", scope: str = "timeline", item_id: Op
         params: dict[str, Any] = {"scope": scope}
         if item_id:
             params["item_id"] = item_id
-        payload, used = transport.call("transcription_source", params, timeout=60.0)
+        payload, used = transport.call("transcription_source", params, timeout=300.0)
         ff = _ffmpeg()
         clips, ranges = [], []
         for src in payload["sources"]:

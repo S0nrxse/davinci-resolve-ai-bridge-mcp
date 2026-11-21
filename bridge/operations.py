@@ -130,6 +130,7 @@ QUEUE_READ_ONLY = frozenset({
     "bridge_capabilities", "project_health", "compare_timelines", "timeline_audio",
     "render_status", "current_context", "fusion_inspect_tool", "project_overview",
     "transcription_source", "media_sources", "timeline_fingerprint", "timeline_notes", "list_checkpoints", "diff_since", "get_preferences",
+    "read_clip_volumes",
 })
 
 # resolve_api: calls that delete project data with no undo through the API.
@@ -971,6 +972,8 @@ class ResolveOperations:
         return pool
 
     def _project_rate(self):
+        if getattr(self, "_pinned_rate", None):
+            return self._pinned_rate  # Fixed for the length of one read-only scan (see transcription_source).
         project = self._project()
         timeline = call(project, "GetCurrentTimeline", None)
         raw = call(timeline, "GetSetting", None, "timelineFrameRate")
@@ -1136,16 +1139,20 @@ class ResolveOperations:
                 found += self._track_split(timeline, kind, index)[1]
         return found
 
-    def _timeline_items(self, timeline=None):
+    def _timeline_items(self, timeline=None, track_types=("video", "audio", "subtitle"), track_index=None):
+        """Every clip as (item, summary). track_types / track_index limit the walk: over the Lua transport each
+        clip costs ~10 round trips, so reading only the tracks an operation needs is much faster."""
         timeline = self._timeline() if timeline is None else timeline
         results = []
-        for track_type in ("video", "audio", "subtitle"):
+        for track_type in track_types:
             count = int(call(timeline, "GetTrackCount", 0, track_type) or 0)
-            for track_index in range(1, count + 1):
-                items = self._track_clips(timeline, track_type, track_index)
+            indexes = range(1, count + 1) if track_index is None else (
+                [int(track_index)] if 1 <= int(track_index) <= count else [])
+            for track_index_ in indexes:
+                items = self._track_clips(timeline, track_type, track_index_)
                 for item_index, item in enumerate(items, 1):
                     results.append(
-                        (item, self._item_summary(item, track_type, track_index, item_index))
+                        (item, self._item_summary(item, track_type, track_index_, item_index))
                     )
         return results
 
@@ -3389,8 +3396,22 @@ class ResolveOperations:
         if len(set(names)) != len(names):
             raise OperationError("Node names must be unique within one fusion_build call.")
         raw_chain = params.get("chain") or ([names[0]] if len(names) == 1 else None)
+        chain_inferred = False
         if not raw_chain:
-            raise OperationError("chain is required with several nodes: list the node names from input to output.")
+            # With {"from": ...} links the graph has one end node that nothing else reads: that is the output,
+            # and the stage's input goes wherever a node asks for {"from": "chain"}.
+            sources = {str(value.get("from")) for spec in specs for value in (spec.get("inputs") or {}).values()
+                       if isinstance(value, dict) and value.get("from")}
+            ends = [name for name in names if name not in sources]
+            if len(ends) != 1:
+                raise OperationError("chain is required here: list the node names from input to output (or link "
+                                     "every node with {\"from\": ...} so exactly one node is the output; now %s)."
+                                     % ("none is" if not ends else "%s all are" % ", ".join(ends)))
+            end_spec = specs[names.index(ends[0])]
+            entry = next((key for key, value in (end_spec.get("inputs") or {}).items()
+                          if isinstance(value, dict) and value.get("from") == "chain"), None)
+            raw_chain = [{"node": ends[0], "input": entry} if entry else ends[0]]
+            chain_inferred = True
         chain = []
         for link in raw_chain:
             node_name, input_id = (link.get("node"), link.get("input")) if isinstance(link, dict) else (link, None)
@@ -3478,6 +3499,9 @@ class ResolveOperations:
         result = {"item": info["id"], "stage": key, "nodes": {name: edit.name(tool) for name, tool in tools.items()},
                   "chain": [edit.name(tools[name]) for name, _ in chain], "frames": "clip offsets",
                   "fusion_start_frame": edit.t0, "verified": verified, "fusion_chain": fusion_chain}
+        if chain_inferred:
+            result["chain_inferred"] = "No chain given: %s is the only node nothing else reads, so it is the output." % (
+                chain[0][0])
         note = self._fusion_summary(verified, lua_ok)
         if key in (fusion_chain or {}).get("left_in_place", []):
             note = "%s sits before one of your own Fusion nodes, so it was left in place." % key
@@ -5189,9 +5213,13 @@ end'''
         height = max(2, int(round(width * timeline_height / float(timeline_width or 1) / 2.0)) * 2)
         # Snapshot before any other render call: live, the first format/codec query changed what
         # GetCurrentRenderFormatAndCodec reported ('unknown' before, mov/H264 after).
+        # The page first: live on Resolve 21.2 Free, GetCurrentRenderMode alone switches Resolve to the Deliver
+        # page (and so does rendering); render_preview_cleanup puts this page back.
+        page = call(self.resolve, "GetCurrentPage", None)
         before = {"format_codec": plain(call(project, "GetCurrentRenderFormatAndCodec", None)),
                   "render_mode": call(project, "GetCurrentRenderMode", None),
-                  "mark_in_out": plain(call(timeline, "GetMarkInOut", None))}
+                  "mark_in_out": plain(call(timeline, "GetMarkInOut", None)),
+                  "page": page}
         choice = self._qc_format(project)
         if choice is None:
             raise OperationError("This Resolve reports no MP4 or QuickTime H.264 codec, so no preview was rendered.")
@@ -5298,6 +5326,13 @@ end'''
         if state is not None:
             restore = self._qc_restore(project, self._timeline(), str(state["preset"]), state["before"], delete=True)
             result.update(restore=restore, settings_restored=restore["settings_restored"])
+            page = state["before"].get("page")
+            if isinstance(page, str) and page:
+                now = call(self.resolve, "GetCurrentPage", None)
+                if now != page:
+                    call(self.resolve, "OpenPage", None, page)
+                    now = call(self.resolve, "GetCurrentPage", None)
+                result["page"] = {"before": page, "now": now, "restored": now == page}
         return result
 
     def _source_window(self, item, timeline_frame):
@@ -6978,11 +7013,28 @@ end'''
         """Where each clip's speech lives: source file, source window and timeline origin. Read-only."""
         timeline = self._timeline()
         fps = self._project_rate()
+        self._pinned_rate = fps
+        try:
+            return self._transcription_source(timeline, fps, params)
+        finally:
+            self._pinned_rate = None
+
+    def _transcription_source(self, timeline, fps, params):
         scope = str(params.get("scope", "clip")).lower()
         if scope not in ("clip", "track", "timeline"):
             raise OperationError("scope must be clip, track or timeline.")
-        items = [(item, info) for item, info in self._timeline_items()
-                 if info["track_type"] in ("audio", "video") and info.get("enabled") is not False]
+        track_index = params.get("track_index") if scope != "clip" else None
+
+        def enabled(pairs):
+            return [(item, info) for item, info in pairs if info.get("enabled") is not False]
+
+        if scope == "clip":
+            items = enabled(self._timeline_items(timeline, ("video", "audio")))
+        else:
+            # Only the tracks this scope can use: audio first, video when the timeline has no audio clips.
+            items = enabled(self._timeline_items(timeline, ("audio",), track_index))
+            if not items:
+                items = enabled(self._timeline_items(timeline, ("video",), track_index))
         if scope == "clip":
             if params.get("item_id") and params.get("item_id") != "playhead":
                 picked = [self._find_timeline_items([params["item_id"]])[0]]
@@ -7021,8 +7073,9 @@ end'''
                 skipped.append({"item_id": entry["item_id"], "name": entry["name"], "reason": "Media is offline or has no file."})
                 continue
             sources.append(entry)
+        fingerprint = self._timeline_fingerprint(timeline) if params.get("fingerprint", True) else None
         return {"timeline": self._timeline_identity(timeline), "timeline_start_frame": float(timeline.GetStartFrame()),
-                "fps": fps, "fingerprint": self._timeline_fingerprint(timeline), "sources": sources, "skipped": skipped}
+                "fps": fps, "fingerprint": fingerprint, "sources": sources, "skipped": skipped}
 
     def _op_review_transcript_cuts(self, params):
         """Mark transcript-chosen ranges for review; apply_silence_cuts applies them on a duplicate."""
@@ -8214,6 +8267,31 @@ end'''
 
     CLIP_VOLUME_RANGE = (-60.0, 24.0)
 
+    def _volume_targets(self, item, info):
+        """The audio items whose clip volume stands for this item: itself, or a video item's linked audio."""
+        if info["track_type"] == "audio":
+            return [(item, info)]
+        return [(other, {"id": call(other, "GetUniqueId", None), "label": "linked audio of %s" % info["label"]})
+                for other in self._linked_items(item)]
+
+    def _op_read_clip_volumes(self, params):
+        """Read-only: current clip volume (dB) of each item, a video item through its linked audio."""
+        ids = params.get("item_ids") or []
+        if not isinstance(ids, list) or not ids:
+            raise OperationError("item_ids must list timeline item ids.")
+        clips = []
+        for item_id in ids[:500]:
+            try:
+                item, info = self._resolve_one_item(item_id)
+            except OperationError as exc:
+                clips.append({"requested_for": item_id, "error": str(exc)})
+                continue
+            for target, target_info in self._volume_targets(item, info):
+                clips.append({"requested_for": info["id"], "item": target_info.get("id"),
+                              "label": target_info.get("label"),
+                              "db": plain(call(target, "GetProperty", None, "AudioVolume"))})
+        return {"clips": clips}
+
     def _op_set_clip_volume(self, params):
         """Set Inspector clip volume (TimelineItem AudioVolume, dB) on audio items, each read back.
 
@@ -8236,9 +8314,7 @@ end'''
             if not math.isfinite(db) or not low <= db <= high:
                 raise OperationError("db must be between %g and %g. Nothing was changed." % (low, high))
             item, info = self._resolve_one_item(request.get("item_id"))
-            targets = [(item, info)] if info["track_type"] == "audio" else [
-                (other, {"id": call(other, "GetUniqueId", None), "label": "linked audio of %s" % info["label"]})
-                for other in self._linked_items(item)]
+            targets = self._volume_targets(item, info)
             if not targets:
                 raise OperationError("%s is a %s item with no linked audio. Nothing was changed." % (info["label"], info["track_type"]))
             plan += [(target, target_info, db, info["id"]) for target, target_info in targets]
@@ -8607,7 +8683,9 @@ end'''
                                             "original)", "current grade layer via CopyGrades", "enabled state", "clip color",
                                             "%d timeline marker(s)" % timeline_markers))
         report["not_carried"] = [line for line in report["not_carried"] if not line.startswith("transitions")] + [
-            "any audio crossfade at the dissolves (an FCPXML spine transition may or may not add one: unverified)",
+            "audio crossfades: the audio stays a hard cut under each dissolve. Resolve 21.2 Free drops audio transitions "
+            "on FCPXML import (live-tested: Final Cut's 'Audio Crossfade' and Resolve's 'Cross Fade +3 dB' both vanished); "
+            "add them in Resolve with the audio edit points selected (Timeline > Add Audio Only Transition)",
             "other transitions and fades the original had, beyond what Resolve's own FCPXML export carries"]
         if fades:
             report["not_carried"].append("the audio fades you asked for are in the FCPXML but did not survive a re-export "
@@ -8645,6 +8723,7 @@ end'''
             "set_clip_properties": self._op_set_clip_properties,
             "set_clip_length": self._op_set_clip_length,
             "set_clip_volume": self._op_set_clip_volume,
+            "read_clip_volumes": self._op_read_clip_volumes,
             "add_transitions": self._op_add_transitions,
             "compare_timelines": self._op_compare_timelines,
             "project_health": self._op_project_health,

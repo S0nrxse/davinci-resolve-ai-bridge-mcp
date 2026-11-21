@@ -60,6 +60,11 @@ class LuaClient:
         self.transaction = None
         self.failed = False
         self.methods = set()
+        # Method names Resolve has shown to be callable during this operation. Another object of the same API
+        # is called directly, without a get_attribute round trip: rpc.lua's invoke() refuses an absent method
+        # with capability_unavailable before running anything, which raises AttributeError here, the same
+        # outcome as the probe (call() falls back to its default either way). Halves a clip walk's round trips.
+        self.callable_names = set()
 
     def request(self, operation, arguments=None):
         if self.failed and operation != "finish_operation":
@@ -173,12 +178,14 @@ class _Proxy:
         if name.startswith("_"):
             raise AttributeError(name)
         key = (self._target, name)
-        reply = ({"kind": "callable"} if key in self._connection.methods else
+        known = key in self._connection.methods or name in self._connection.callable_names
+        reply = ({"kind": "callable"} if known else
                  self._connection.request("get_attribute", {"target": self._target, "name": name}))
         if reply.get("kind") == "absent":
             raise AttributeError(name)
         if reply.get("kind") == "callable":
             self._connection.methods.add(key)
+            self._connection.callable_names.add(name)
             def method(*args):
                 result = self._connection.request("call", {"target": self._target, "method": name,
                                                           "args": self._connection.encode(args)})

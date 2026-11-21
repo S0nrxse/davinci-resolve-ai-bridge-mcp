@@ -110,7 +110,38 @@ class Harness(unittest.TestCase):
         for params in cleanups:
             self.assertFalse(params["keep_file"])
             self.assertTrue(params["restore"]["preset"].startswith("ResolveAIBridge-QC-"))
-            self.assertEqual(set(params["restore"]["before"]), {"format_codec", "render_mode", "mark_in_out"})
+            self.assertEqual(set(params["restore"]["before"]), {"format_codec", "render_mode", "mark_in_out", "page"})
+
+
+class PageRestoreTests(Harness):
+    """Starting a render switches Resolve to the Deliver page; cleanup puts the user's page back."""
+
+    def test_page_is_put_back_after_each_render(self):
+        project = FrameProject()
+        state = {"page": "edit"}
+
+        class PagedResolve(Resolve):
+            def GetCurrentPage(self):
+                return state["page"]
+
+            def OpenPage(self, page):
+                state["page"] = page
+                return True
+
+        self.project = project
+        self.ops = ResolveOperations(lambda: PagedResolve(project), runtime_home=str(self.home))
+
+        def call(operation, params, timeout):
+            result = self.call(operation, params, timeout)
+            if operation == "render_preview":
+                state["page"] = "deliver"  # What StartRendering does in Resolve.
+            return result
+
+        result = self.run_frames(call=call, frames=[TL_START + 10])
+        self.assertEqual(state["page"], "edit")
+        self.assertTrue(result["settings_restored"])
+        cleanups = [params for name, params in self.calls if name == "render_preview_cleanup"]
+        self.assertEqual(cleanups[0]["restore"]["before"]["page"], "edit")
 
 
 # ----------------------------------------------------------------- planning

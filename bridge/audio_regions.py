@@ -581,10 +581,49 @@ def _gain(integrated, peak, target, ceiling):
             "peak_limited_gain_db": round(ceiling - peak, 1) if limited else None}
 
 
-def _measure_one(ffmpeg, source, stream, want_blocks):
+SPEECH_MIN_SEC = 1.0  # A clip needs this much dialogue-level sound (or SPEECH_MIN_SHARE of a shorter clip)...
+SPEECH_MIN_SHARE = 0.4
+SPEECH_FLOOR_SEC = 0.4  # ...and never less than one EBU R128 400 ms block.
+SPEECH_PAD_SEC = 0.15
+SPEECH_JOIN_SEC = 0.3
+SPEECH_MAX_SPANS = 300
+
+
+def _select(spans):
+    """ffmpeg filter keeping only [(a, b)] seconds of the input (relative to the seek point), joined up."""
+    return "aselect='%s',asetpts=N/SR/TB," % "+".join("between(t,%.3f,%.3f)" % (a, b) for a, b in spans)
+
+
+def speech_minimum(duration):
+    """Dialogue-level seconds a clip of ``duration`` needs before gate="speech" measures it."""
+    return max(SPEECH_FLOOR_SEC, min(SPEECH_MIN_SEC, SPEECH_MIN_SHARE * float(duration)))
+
+
+def speech_spans(levels, threshold_db, duration, hop_sec=HOP_SEC):
+    """([(start, end)] seconds where the 10 ms level is over ``threshold_db``, padded and joined; loud seconds).
+    The spans are [] when the loud seconds are under speech_minimum(duration)."""
+    runs = _loud_runs([v > threshold_db for v in levels], hop_sec, bridge_sec=SPEECH_JOIN_SEC)
+    loud = sum(b - a for a, b in runs)
+    if loud < speech_minimum(duration):
+        return [], loud
+    join = SPEECH_JOIN_SEC
+    while True:
+        spans = []
+        for a, b in runs:
+            a, b = max(0.0, a - SPEECH_PAD_SEC), min(duration, b + SPEECH_PAD_SEC)
+            if spans and a - spans[-1][1] < join:
+                spans[-1][1] = max(spans[-1][1], b)
+            else:
+                spans.append([a, b])
+        if len(spans) <= SPEECH_MAX_SPANS:
+            return [(round(a, 3), round(b, 3)) for a, b in spans], loud
+        join *= 2
+
+
+def _measure_one(ffmpeg, source, stream, want_blocks, spans=None):
     start = float(source["source_start_sec"])
     duration = float(source["duration_sec"])
-    af = "ebur128=peak=true:framelog=quiet"
+    af = (_select(spans) if spans else "") + "ebur128=peak=true:framelog=quiet"
     if want_blocks:
         af += ":metadata=1,ametadata=mode=print:key=lavfi.r128.M:file=-"
     cmd = [ffmpeg, "-hide_banner", "-nostats", "-loglevel", "info", "-ss", "%.6f" % start, "-t", "%.6f" % duration,
@@ -639,10 +678,12 @@ def _program_exact(ffmpeg, measured, stream):
     for i, s in enumerate(measured):
         cmd += ["-ss", "%.6f" % float(s["source_start_sec"]), "-t", "%.6f" % float(s["duration_sec"]),
                 "-i", str(s["file_path"])]
-        if uniform:
+        select = _select(s["speech_spans"])[:-1] if s.get("speech_spans") else ""
+        if uniform and not select:
             labels.append("[%d:a:%d]" % (i, int(stream or 0)))
         else:
-            chains.append("[%d:a:%d]aformat=channel_layouts=stereo[p%d]" % (i, int(stream or 0), i))
+            steps = [step for step in (select, "" if uniform else "aformat=channel_layouts=stereo") if step]
+            chains.append("[%d:a:%d]%s[p%d]" % (i, int(stream or 0), ",".join(steps), i))
             labels.append("[p%d]" % i)
     graph = ";".join(chains + ["%sconcat=n=%d:v=0:a=1,ebur128=peak=true:framelog=quiet[out]"
                                % ("".join(labels), len(measured))])
@@ -661,13 +702,19 @@ def _program_exact(ffmpeg, measured, stream):
     return data, note
 
 
-def measure_loudness(sources, ffmpeg, *, target_lufs=-14.0, true_peak_ceiling_db=-1.0, stream=None):
+def measure_loudness(sources, ffmpeg, *, target_lufs=-14.0, true_peak_ceiling_db=-1.0, stream=None, gate="none"):
     """EBU R128 loudness of each clip's source window, and of all clips back to back (the programme).
 
     ``sources``: ``transcription_source`` entries. ``stream`` picks the audio track (audio-relative index,
-    default 0) for every clip. Returns {"clips", "program", "target_lufs", "true_peak_ceiling_db", "stream",
-    "note"}. Nothing is applied: gains are suggestions only.
+    default 0) for every clip. ``gate="speech"`` measures dialogue only: one level threshold for the whole
+    programme (adaptive_threshold over every clip's 10 ms levels) marks dialogue-level sound; each clip's
+    loudness (and the programme's) is measured over those stretches only, true peak still over the whole clip,
+    and a clip with less of it than speech_minimum() is left unmeasured instead of getting a large gain for room
+    noise. Returns {"clips", "program", "target_lufs", "true_peak_ceiling_db", "stream", "gate", "note"}.
+    Nothing is applied: gains are suggestions only.
     """
+    if gate not in ("none", "speech"):
+        raise AudioRegionsError('gate must be "none" or "speech".')
     _check_ffmpeg(ffmpeg)
     target = _number(target_lufs, "target_lufs")
     ceiling = _number(true_peak_ceiling_db, "true_peak_ceiling_db")
@@ -686,6 +733,25 @@ def measure_loudness(sources, ffmpeg, *, target_lufs=-14.0, true_peak_ceiling_db
     order = sorted(range(len(sources)), key=lambda i: (float(sources[i]["timeline_start_frame"]), i))
     pooled = len(sources) > EXACT_PROGRAM_MAX
     clips, measured, blocks, skipped = [], [], [], []
+    gate_info, spans_for = None, {}
+    if gate == "speech":
+        levels_for, pooled_levels = {}, array.array("f")
+        for i in order:
+            s = sources[i]
+            if float(s["duration_sec"]) > 0 and os.path.isfile(str(s["file_path"])):
+                try:
+                    levels_for[i] = fine_hop_levels(ffmpeg, s["file_path"], float(s["source_start_sec"]),
+                                                    float(s["duration_sec"]), stream)
+                except AudioRegionsError:
+                    continue  # Measured (and reported) below like any clip ffmpeg cannot read.
+                pooled_levels.extend(levels_for[i])
+        gate_info = adaptive_threshold(pooled_levels)
+        loud_for = {}
+        for i, levels in levels_for.items():
+            spans_for[i], loud_for[i] = speech_spans(levels, gate_info["threshold_db"], float(sources[i]["duration_sec"]))
+        gate_info = dict(gate_info, method="one threshold for the whole programme (10 ms RMS levels)",
+                         min_speech=("%.1f s, or %d%% of a shorter clip (at least %.1f s)"
+                                     % (SPEECH_MIN_SEC, SPEECH_MIN_SHARE * 100, SPEECH_FLOOR_SEC)))
     for i in order:
         s = sources[i]
         duration = float(s["duration_sec"])
@@ -696,7 +762,27 @@ def measure_loudness(sources, ffmpeg, *, target_lufs=-14.0, true_peak_ceiling_db
         elif not os.path.isfile(str(s["file_path"])):
             reason, data = "The clip's media file is offline: %s" % s["file_path"], None
         else:
-            data, reason, momentary = _measure_one(ffmpeg, s, stream, pooled)
+            data, reason, momentary = _measure_one(ffmpeg, s, stream, pooled and gate != "speech")
+        if data is not None and gate == "speech":
+            spans = spans_for.get(i) or []
+            entry["speech_seconds"] = round(loud_for.get(i, 0.0), 2)
+            if not spans:
+                full = data["integrated_lufs"]
+                entry.update(_loudness_values(data, duration, target, ceiling))
+                entry.update(integrated_lufs_all=entry["integrated_lufs"], integrated_lufs=None, gain_db=None,
+                             peak_limited=False, peak_limited_gain_db=None, measured=False,
+                             reason=("No dialogue: %.2f s above the speech gate (%.1f dBFS), under the %.2f s this "
+                                     "clip needs. Left alone so room noise is not boosted."
+                                     % (loud_for.get(i, 0.0), gate_info["threshold_db"], speech_minimum(duration))))
+                skipped.append({"item_id": s.get("item_id"), "name": s.get("name"), "reason": entry["reason"]})
+                clips.append(entry)
+                continue
+            speech, _, momentary = _measure_one(ffmpeg, s, stream, pooled, spans=spans)
+            all_lufs = data["integrated_lufs"]
+            data = {"integrated_lufs": speech["integrated_lufs"], "lra_lu": speech["lra_lu"],
+                    "true_peak_dbtp": data["true_peak_dbtp"]}  # Peak from the whole clip: it all gets the gain.
+            entry["integrated_lufs_all"] = None if all_lufs is None or all_lufs <= GATE_LUFS + 0.05 else round(all_lufs, 1)
+            s = dict(s, speech_spans=spans)
         if data is None:
             entry.update(integrated_lufs=None, lra_lu=None, true_peak_dbtp=None, gain_db=None, peak_limited=False,
                          peak_limited_gain_db=None, reason=reason, measured=False)
@@ -707,7 +793,9 @@ def measure_loudness(sources, ffmpeg, *, target_lufs=-14.0, true_peak_ceiling_db
             blocks.extend(momentary)
         clips.append(entry)
 
-    program = {"clips": len(measured), "seconds": round(sum(float(s["duration_sec"]) for s in measured), 3),
+    program = {"clips": len(measured), "seconds": round(sum(
+        sum(b - a for a, b in s["speech_spans"]) if s.get("speech_spans") else float(s["duration_sec"])
+        for s in measured), 3),
                "skipped": skipped}
     if not measured:
         program.update(integrated_lufs=None, lra_lu=None, true_peak_dbtp=None, method=None,
@@ -729,7 +817,10 @@ def measure_loudness(sources, ffmpeg, *, target_lufs=-14.0, true_peak_ceiling_db
                                     "clip peak." % EXACT_PROGRAM_MAX))
     if program.get("integrated_lufs") is None and measured and program.get("reason") is None:
         program["reason"] = "Too quiet to measure."
+    note = LOUDNESS_NOTE + (" The programme is the clips played back to back in timeline order (no overlaps, "
+                            "crossfades or other tracks), not a render of the timeline.")
+    if gate == "speech":
+        note += (" gate=speech: loudness is of dialogue-level stretches only (integrated_lufs_all is the whole clip); "
+                 "true peak is the whole clip's. The programme is the dialogue stretches back to back.")
     return {"clips": clips, "program": program, "target_lufs": target, "true_peak_ceiling_db": ceiling,
-            "stream": int(stream or 0),
-            "note": LOUDNESS_NOTE + " The programme is the clips played back to back in timeline order (no "
-                                    "overlaps, crossfades or other tracks), not a render of the timeline."}
+            "stream": int(stream or 0), "gate": gate, "speech_gate": gate_info, "note": note}

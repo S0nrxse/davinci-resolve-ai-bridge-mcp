@@ -145,6 +145,22 @@ class ThresholdTests(unittest.TestCase):
         self.assertEqual(silent["floor_db"], ar.FLOOR_MIN_DB)
 
 
+class SpeechGateTests(unittest.TestCase):
+    def test_minimum_scales_with_short_clips(self):
+        self.assertEqual(ar.speech_minimum(10.0), ar.SPEECH_MIN_SEC)
+        self.assertAlmostEqual(ar.speech_minimum(1.5), 0.6)
+        self.assertEqual(ar.speech_minimum(0.5), ar.SPEECH_FLOOR_SEC)
+
+    def test_spans_are_padded_joined_and_refused_when_short(self):
+        levels = [-60.0] * 100 + [-20.0] * 80 + [-60.0] * 20 + [-20.0] * 50 + [-60.0] * 150  # 4 s of 10 ms hops.
+        spans, loud = ar.speech_spans(levels, -40.0, 4.0)
+        self.assertAlmostEqual(loud, 1.5, delta=0.01)  # The 0.2 s gap is bridged into the run.
+        self.assertEqual(len(spans), 1)  # A 0.2 s gap is joined.
+        self.assertAlmostEqual(spans[0][0], 1.0 - ar.SPEECH_PAD_SEC, delta=0.01)
+        self.assertAlmostEqual(spans[0][1], 2.5 + ar.SPEECH_PAD_SEC, delta=0.01)
+        self.assertEqual(ar.speech_spans([-60.0] * 300 + [-20.0] * 50, -40.0, 3.5)[0], [])
+
+
 class FrameConversionTests(unittest.TestCase):
     """Absolute timeline frames with a non-zero timeline start and source offset, without ffmpeg."""
 
@@ -321,6 +337,32 @@ class FfmpegTests(unittest.TestCase):
         self.assertLess(analysis["floor_db"], -50)
         self.assertGreater(analysis["threshold_db"], analysis["floor_db"])
         self.assertAlmostEqual(analysis["decoded_seconds"], 3.5, delta=0.02)
+
+    def test_speech_gate_leaves_room_tone_alone(self):
+        root = Path(self.tmp.name)
+        talk, room = root / "talk.wav", root / "room.wav"
+        write_wav(talk, [(0.5, None), (1.5, -20.0), (0.5, None), (0.5, -22.0)], rate=48000, noise_db=-55.0)
+        write_wav(room, [(3.0, None)], rate=48000, noise_db=-50.0, seed=3)
+        sources = [self.source(talk, origin=86400, item="t", name="talk"),
+                   self.source(room, origin=86472, item="r", name="room")]
+        plain = ar.measure_loudness(sources, FFMPEG, target_lufs=-14.0)
+        self.assertGreater(plain["clips"][1]["gain_db"], 25)  # Ungated: room tone asks for a huge boost.
+        gated = ar.measure_loudness(sources, FFMPEG, target_lufs=-14.0, gate="speech")
+        talk_entry, room_entry = gated["clips"]
+        self.assertTrue(talk_entry["measured"])
+        self.assertAlmostEqual(talk_entry["speech_seconds"], 2.0, delta=0.1)
+        self.assertIsNotNone(talk_entry["gain_db"])
+        self.assertEqual(talk_entry["true_peak_dbtp"], plain["clips"][0]["true_peak_dbtp"])  # Whole-clip peak.
+        self.assertFalse(room_entry["measured"])
+        self.assertIsNone(room_entry["gain_db"])
+        self.assertIn("No dialogue", room_entry["reason"])
+        self.assertIsNotNone(room_entry["integrated_lufs_all"])
+        self.assertEqual(gated["program"]["clips"], 1)
+        self.assertAlmostEqual(gated["program"]["seconds"], 2.0 + 4 * ar.SPEECH_PAD_SEC, delta=0.25)
+        self.assertEqual(gated["gate"], "speech")
+        self.assertLess(gated["speech_gate"]["threshold_db"], -25)
+        with self.assertRaises(ar.AudioRegionsError):
+            ar.measure_loudness(sources, FFMPEG, gate="dialog")
 
     def test_loudness_per_clip_program_and_gain(self):
         sources = [self.source(self.quiet, origin=86472, item="q", name="quiet"),
