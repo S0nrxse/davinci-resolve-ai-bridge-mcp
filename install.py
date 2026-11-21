@@ -17,15 +17,19 @@ from pathlib import Path
 
 
 from bridge.operations import AGENT_VERSION as VERSION
-from bridge.lifecycle import WorkerLock, load_token, replace_token, private_directory, atomic_json
+from bridge.lifecycle import (WorkerLock, load_token, replace_token, private_directory, atomic_json,
+                              app_store_container, default_home)
 ROOT = Path(__file__).resolve().parent
-HOME = Path(os.environ.get("RESOLVE_AI_BRIDGE_HOME", Path.home() / ".resolve-ai-bridge")).expanduser().absolute()
+HOME = default_home().absolute()
 TOKEN_FILE = HOME / "token.txt"
 
 MENU_FOLDER = "Resolve AI Bridge"
 CONFIG_BACKUPS_KEPT = 3
 MENU_SCRIPTS = ("Start AI Bridge.py", "Bridge Status.py", "Stop AI Bridge.py",
-                "Start AI Bridge (Lua).lua", "Bridge Status (Lua).lua", "Stop AI Bridge (Lua).lua")
+                "Start AI Bridge (Lua).lua", "Bridge Status (Lua).lua", "Stop AI Bridge (Lua).lua",
+                "Open AI Chat.lua", "Open AI Chat.py")
+CHAT_FILES = ("__init__.py", "agents.py", "changes.py", "server.py")
+CHAT_APP_DIR = Path.home() / "Applications"
 CONSOLE_LINE = (
     'import os;exec(open(os.path.join(os.path.expanduser(os.getenv("RESOLVE_AI_BRIDGE_HOME") or "~/.resolve-ai-bridge"),"ResolveConsole.py"),'
     'encoding="utf-8").read())'
@@ -57,6 +61,14 @@ def copy_runtime(runtime_home=None):
     shutil.copytree(ROOT / "bridge", HOME / "bridge",
                     ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".DS_Store"))
     shutil.copytree(ROOT / "agent" / "lua", HOME / "lua")
+    private_directory(HOME / "chat")
+    for name in CHAT_FILES:
+        shutil.copy2(ROOT / "chat" / name, HOME / "chat" / name)
+    if (ROOT / "chat" / "skills").is_dir():
+        shutil.copytree(ROOT / "chat" / "skills", HOME / "chat" / "skills", dirs_exist_ok=True)
+    if (ROOT / "chat" / "dist" / "index.html").is_file():
+        (HOME / "chat" / "dist").mkdir(exist_ok=True)
+        shutil.copy2(ROOT / "chat" / "dist" / "index.html", HOME / "chat" / "dist" / "index.html")
     active_home = Path(runtime_home or HOME).expanduser().absolute()
     source = (ROOT / "agent" / "ResolveLua.lua").read_text(encoding="utf-8")
     for name, action in (("ResolveLua.lua", "start"), ("StopLua.lua", "stop"), ("StatusLua.lua", "status")):
@@ -65,7 +77,7 @@ def copy_runtime(runtime_home=None):
         (HOME / name).write_text(header + source, encoding="utf-8")
     for name in ("lua-inbox.json", "lua-outbox.json", "lua-agent.json", "lua-stop.json"):
         atomic_json(HOME / name, {})
-    for source in [HOME / "ResolveConsole.py", * (HOME / "bridge").glob("*.py")]:
+    for source in [HOME / "ResolveConsole.py", * (HOME / "bridge").glob("*.py"), * (HOME / "chat").glob("*.py")]:
         compile(source.read_text(encoding="utf-8"), str(source), "exec")
     for name in ("operations.py", "server.py", "client.py", "transport.py", "lifecycle.py"):
         if not (HOME / "bridge" / name).is_file():
@@ -171,7 +183,7 @@ def _stage_runtime(destination, previous, skip, with_ffmpeg):
             for item in destination.iterdir():
                 if item.name not in {"bridge", "ResolveConsole.py", ".venv", "agent.json", "worker.lock", "stop.json",
                                      "lua", "ResolveLua.lua", "StopLua.lua", "StatusLua.lua", "lua-inbox.json",
-                                     "lua-outbox.json", "lua-agent.json", "lua-stop.json"}:
+                                     "lua-outbox.json", "lua-agent.json", "lua-stop.json", "chat"}:
                     if with_ffmpeg and item.name == "ffmpeg-path.txt":
                         continue
                     target = stage / item.name
@@ -303,6 +315,64 @@ def install_source_decoder():
     print("      Configured the private FFmpeg source decoder.")
 
 
+# --------------------------------------------------------- local transcription
+
+WHISPER_MODEL_URL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin"
+
+
+def install_whisper():
+    """Optional: whisper.cpp (Homebrew) plus a ~575 MB speech model for transcribe/subtitles."""
+    from bridge import transcribe
+    if not transcribe.whisper_binary():
+        brew = shutil.which("brew")
+        if not brew:
+            print("      Skipped transcription: install Homebrew, then run `brew install whisper-cpp`.")
+            return False
+        result = subprocess.run([brew, "install", "whisper-cpp"], capture_output=True, text=True)
+        if result.returncode:
+            print("      Could not install whisper-cpp: %s" % (result.stderr or result.stdout).strip()[-300:])
+            return False
+    models = HOME / "models"
+    models.mkdir(parents=True, exist_ok=True)
+    target = models / WHISPER_MODEL_URL.rsplit("/", 1)[-1]
+    if not transcribe.whisper_model(HOME):
+        import urllib.request
+        partial = target.with_suffix(".part")
+        print("      Downloading the speech model (about 575 MB)...")
+        try:
+            urllib.request.urlretrieve(WHISPER_MODEL_URL, partial)
+            os.replace(partial, target)
+        except OSError as exc:
+            partial.unlink(missing_ok=True)
+            print("      Could not download the speech model: %s" % exc)
+            return False
+    return True
+
+
+# ------------------------------------------------------------ chat panel app
+
+
+def install_chat_app():
+    """Build the docked macOS chat panel. Returns the .app path, or None with a reason printed."""
+    entry = {"python": str(venv_python().absolute()), "server": str((HOME / "chat" / "server.py").absolute()),
+             "home": str(HOME.absolute())}
+    (HOME / "chat-app.json").write_text(json.dumps(entry, indent=2) + "\n", encoding="utf-8")
+    if sys.platform != "darwin":
+        print("      The docked chat panel is macOS only. Run the panel in a browser with:")
+        print("        %s %s --open" % (entry["python"], entry["server"]))
+        return None
+    if shutil.which("xcrun") is None:
+        print("      Skipped the chat panel app: Xcode command line tools are missing (xcode-select --install).")
+        return None
+    try:
+        result = subprocess.run(["sh", str(ROOT / "chat" / "macos" / "build.sh"), str(CHAT_APP_DIR),
+                                 str(HOME / "chat-app.json")], check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as exc:
+        print("      Could not build the chat panel app: %s" % (exc.stderr or exc.stdout or exc).strip()[-400:])
+        return None
+    return result.stdout.strip().splitlines()[-1]
+
+
 # ------------------------------------------------------- Resolve Scripts menu
 
 
@@ -314,7 +384,11 @@ def resolve_script_roots():
     """
     home = Path.home()
     if sys.platform.startswith("darwin"):
-        return [home / "Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts"]
+        roots = [home / "Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts"]
+        container = app_store_container()
+        if container is not None:  # The sandboxed App Store build only scans its own container.
+            roots.insert(0, container / "Library/Application Support/Fusion/Scripts")
+        return roots
     if os.name == "nt":
         appdata = Path(os.environ.get("APPDATA", home / "AppData/Roaming"))
         return [
@@ -390,6 +464,22 @@ def remove_menu_scripts():
             except OSError:
                 pass
     return removed
+
+
+def install_bundled_chat_skills():
+    """DaVinci starter skills, shared with Claude Code (~/.claude/skills). Never overwrites the user's edits."""
+    installed = []
+    for skill in sorted((ROOT / "chat" / "skills").glob("*/SKILL.md")):
+        target = Path.home() / ".claude" / "skills" / skill.parent.name / "SKILL.md"
+        if target.exists():
+            continue
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(skill, target)
+            installed.append(str(target))
+        except OSError:
+            continue
+    return installed
 
 
 def install_skills():
@@ -667,6 +757,8 @@ def main():
     parser.add_argument("--skip-deps", action="store_true", help="Skip installation of the MCP dependency")
     parser.add_argument("--no-menu", action="store_true", help="Skip the Workspace > Scripts menu entries")
     parser.add_argument("--with-ffmpeg", action="store_true", help="Install an optional private FFmpeg binary for Free-compatible frame/audio extraction")
+    parser.add_argument("--no-chat-app", action="store_true", help="Skip building the docked chat panel app (macOS)")
+    parser.add_argument("--with-whisper", action="store_true", help="Set up local transcription and subtitles (whisper.cpp + ~575 MB model)")
     parser.add_argument("--uninstall", action="store_true", help="Remove the installed per-user runtime")
     args = parser.parse_args()
 
@@ -695,10 +787,16 @@ def main():
         else:
             print("[4/5] Could not install the Workspace > Scripts menu entries. Use the Console fallback below.")
         skill_paths = install_skills()
+        install_bundled_chat_skills()
         print("[5/5] Installed the Resolve editing skill in standard skill locations.")
         launcher_paths = install_global_launcher()
         if launcher_paths:
             print("      Installed global CLI launcher at %s" % launcher_paths[0])
+        if args.with_whisper and install_whisper():
+            print("      Local transcription is ready (transcribe, generate_subtitles, find_filler_words).")
+        chat_app = None if args.no_chat_app else install_chat_app()
+        if chat_app:
+            print("      Installed the chat panel: %s" % chat_app)
         auto_configured = auto_configure_clients(_entry)
         if auto_configured:
             print("      Auto-configured clients: %s" % ", ".join(auto_configured))
@@ -756,6 +854,11 @@ def main():
     print("          %s" % CONSOLE_LINE)
     print("        The same line is saved at %s" % (HOME / "console-command.txt"))
     print("        Free 21.1+ Lua fallback (Lua Console): %s" % LUA_CONSOLE_LINE)
+
+    if chat_app:
+        print("\nCHAT    Open \"Resolve AI Chat\" from %s (or Workspace > Scripts > Resolve AI Bridge >" % CHAT_APP_DIR)
+        print("        Open AI Chat). It docks on Resolve's right edge; Option-Command-A shows or hides it.")
+        print("        Claude Code must be signed in: run `claude` once and type /login.")
 
     print("\nVERIFY  python3 tools/doctor.py")
     print("        Then ask your AI: \"Call resolve_status and tell me what is open.\"")

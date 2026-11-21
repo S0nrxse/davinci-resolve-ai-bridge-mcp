@@ -22,3 +22,6 @@ dist-web/
 .idea/
 .vscode/
 *.swp
+
+# Built chat panel (shipped in the npm package and copied by the installer)
+!chat/dist/

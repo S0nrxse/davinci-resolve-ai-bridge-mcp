@@ -249,6 +249,28 @@ class ReliabilityTests(unittest.TestCase):
             self.runtime.stop_event.set()
             self.runtime.thread.join(3)
 
+    def run_worker(self):
+        self.runtime.thread = threading.Thread(target=self.runtime._loop)
+        self.runtime.thread.start()
+        def stop():
+            self.runtime.stop_event.set()
+            self.runtime.thread.join(3)
+        self.addCleanup(stop)
+
+    def test_worker_restart_with_the_same_context_re_observes_and_edits(self):
+        client._observed = {"context": dict(self.context), "session": "an-earlier-worker"}
+        self.run_worker()
+        self.assertEqual(client.call("add_marker", timeout=5), {"edited": True})
+        self.assertEqual(self.ops.dispatch.call_args_list[-1].args[0], "add_marker")
+        self.assertEqual(client._observed["session"], self.runtime.session)
+
+    def test_worker_restart_with_another_timeline_is_refused_before_dispatch(self):
+        client._observed = {"context": {"project_id": "p1", "timeline_id": "old"}, "session": "an-earlier-worker"}
+        self.run_worker()
+        with self.assertRaisesRegex(client.BridgeCallError, "context changed"):
+            client.call("add_marker", timeout=5)
+        self.assertNotIn("add_marker", [c.args[0] for c in self.ops.dispatch.call_args_list])
+
     def test_install_failure_preserves_runtime(self):
         console.HEARTBEAT_FILE.unlink()
         (self.home / "bridge").mkdir()

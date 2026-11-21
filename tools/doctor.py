@@ -10,7 +10,11 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-HOME = Path(os.environ.get("RESOLVE_AI_BRIDGE_HOME", Path.home() / ".resolve-ai-bridge")).expanduser()
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from bridge.lifecycle import app_store_container, default_home  # noqa: E402
+
+HOME = default_home()
 MENU_FOLDER = "Resolve AI Bridge"
 failures = 0
 warnings = 0
@@ -55,6 +59,9 @@ def menu_script_folders():
     home = Path.home()
     if sys.platform.startswith("darwin"):
         roots = [home / "Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts"]
+        container = app_store_container()
+        if container is not None:
+            roots.insert(0, container / "Library/Application Support/Fusion/Scripts")
     elif os.name == "nt":
         appdata = Path(os.environ.get("APPDATA", home / "AppData/Roaming"))
         roots = [

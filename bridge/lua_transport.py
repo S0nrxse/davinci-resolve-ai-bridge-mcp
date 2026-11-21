@@ -35,6 +35,18 @@ class _ReplyFailure(_WireFailure):
     """The request was published, but its outcome could not be read."""
 
 
+class _Refused(_WireFailure):
+    """The worker answered and refused this RPC (bad timestamp, expired, session changed...): it did not run it."""
+
+    def __init__(self, message, code=None):
+        super().__init__(message)
+        self.code = code
+
+
+NOT_DISPATCHED = "no new operation started"  # qc._patient and colormatch retry only errors carrying this.
+LOCK_WAIT_SECONDS = 180.0  # Waiting for another client's operation; nothing is dispatched meanwhile.
+
+
 def _canonical(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False)
 
@@ -84,7 +96,7 @@ class LuaClient:
             error = reply["error"]
             if error.get("code") == "capability_unavailable":
                 raise AttributeError(error.get("message", "Resolve method unavailable"))
-            raise _WireFailure("Lua RPC refused: %s. Inspect before retrying." % error)
+            raise _Refused("Lua RPC refused: %s. Inspect before retrying." % error, error.get("code"))
         result = reply.get("result")
         if isinstance(result, dict) and result.get("truncated"):
             raise _ReplyFailure("Lua reply was truncated; stopped rather than using incomplete timeline data.")
@@ -240,18 +252,57 @@ def _write_terminal_record(record, data):
     return True
 
 
+def _lock_wait():
+    import os
+    try:
+        return max(0.0, float(os.environ.get("RESOLVE_AI_BRIDGE_LOCK_WAIT_SECONDS", LOCK_WAIT_SECONDS)))
+    except ValueError:
+        return LOCK_WAIT_SECONDS
+
+
 def call(operation, params=None, timeout=30):
-    """Serialize complete operations and bind edits to this client's observations."""
+    """Serialize complete operations and bind edits to this client's observations.
+
+    A failure the worker proves happened before the operation was dispatched (it refused the health or lease
+    request, e.g. a stale timestamp after Resolve stalled) is retried once with a fresh session. Nothing that
+    may have reached dispatch is ever retried.
+    """
+    try:
+        return _call_once(operation, params, timeout)
+    except _PreDispatchRefusal as exc:
+        _LOG.warning("Lua worker refused before dispatch (%s); retrying once.", exc.code)
+        try:
+            return _call_once(operation, params, timeout)
+        except _PreDispatchRefusal as again:
+            raise client.BridgeCallError(
+                "The Lua worker refused this request twice before dispatch (%s); %s. Check Bridge Status (Lua); "
+                "Resolve may be busy or stalled." % (again.code, NOT_DISPATCHED)) from again
+
+
+class _PreDispatchRefusal(client.BridgeCallError):
+    def __init__(self, message, code):
+        super().__init__(message)
+        self.code = code
+
+
+def _call_once(operation, params=None, timeout=30):
     global _observed, _last_cleanup
     connection = LuaClient(timeout=timeout)
     lock = lifecycle.WorkerLock(connection.home.with_name(connection.home.name + ".lua-operation"))
+    # Waiting for another client's operation dispatches nothing, so it has its own budget and does not
+    # eat this operation's deadline (which starts once the lock is held).
+    wait_until = time.time() + max(float(timeout), _lock_wait())
     while not lock.acquire():
-        if time.time() >= connection.deadline:
-            raise client.BridgeTimeout("Timed out before Lua dispatch; no new operation started.")
+        if time.time() >= wait_until:
+            raise client.BridgeTimeout("Timed out waiting for another client's Resolve operation to finish; "
+                                       "%s. Retry when it is done." % NOT_DISPATCHED)
         time.sleep(0.05)
+    connection.deadline = time.time() + float(timeout)
     record = None
     release_lease = False
     result = None
+    dispatched = False
+    note = None
     try:
         # Lua-only sessions have no Python Console loop to prune recovery data.
         # Run under the operation lock and avoid rescanning on every native RPC.
@@ -263,20 +314,42 @@ def call(operation, params=None, timeout=30):
                 pass  # Cleanup is best effort; retry on the next operation.
             else:
                 _last_cleanup = (connection.home, now)
-        connection.health()
-        connection.transaction = uuid.uuid4().hex
         try:
-            connection.request("begin_operation", {"deadline": connection.deadline})
-        except _ReplyFailure:
-            # The worker may have accepted the lease before losing the reply.
-            # Cleanup is bound to our session and transaction, never an edit.
-            release_lease = True
-            raise
+            connection.health()
+            connection.transaction = uuid.uuid4().hex
+            try:
+                connection.request("begin_operation", {"deadline": connection.deadline})
+            except _ReplyFailure:
+                # The worker may have accepted the lease before losing the reply.
+                # Cleanup is bound to our session and transaction, never an edit.
+                release_lease = True
+                raise
+        except _Refused as exc:
+            connection.failed = False  # A refusal is a definite answer; finish_operation may still run.
+            release_lease = connection.transaction is not None
+            raise _PreDispatchRefusal("%s Request record: dispatch not started; %s." % (exc, NOT_DISPATCHED),
+                                      exc.code) from exc
         release_lease = True
-        ops = ResolveOperations(lambda: _Proxy(connection, "resolve"), transport="lua")
+        ops = ResolveOperations(lambda: _Proxy(connection, "resolve"), transport="lua", runtime_home=connection.home)
         context = ops.queue_context()
-        if operation not in QUEUE_READ_ONLY and _observed != {"session": connection.session, "context": context}:
-            raise client.BridgeCallError("Inspect resolve_status or timeline_overview in this client before editing; Lua session/context changed.")
+        current = {"session": connection.session, "context": context}
+        if operation not in QUEUE_READ_ONLY and _observed != current:
+            seen = _observed
+            if seen is not None and seen.get("context") == context:
+                # Only the worker session changed (Stop/Start or a worker restart) and the same project and
+                # timeline this client last inspected are still open: reconnect instead of refusing.
+                note = ("Reconnected to a restarted Lua worker; the same project and timeline this client last "
+                        "inspected are still open, so the edit went ahead.")
+            elif seen is None:
+                raise client.BridgeCallError(
+                    "Inspect resolve_status or timeline_overview in this client before editing; this client has "
+                    "no current observation (new MCP process, or the last outcome was uncertain). %s."
+                    % NOT_DISPATCHED.capitalize())
+            else:
+                raise client.BridgeCallError(
+                    "The open project/timeline changed since this client last looked (was %s, now %s). Inspect "
+                    "timeline_overview before editing; Lua session/context changed. %s."
+                    % (_describe(seen.get("context")), _describe(context), NOT_DISPATCHED.capitalize()))
         request_id = uuid.uuid4().hex
         lifecycle.private_directory(connection.home / "requests")
         pending_record = connection.home / "requests" / (request_id + ".json")
@@ -284,6 +357,7 @@ def call(operation, params=None, timeout=30):
                 "context": context, "state": "running", "transport": "lua", "time": time.time()}
         lifecycle.atomic_json(pending_record, data)
         record = pending_record
+        dispatched = True
         result = ops.dispatch(operation, params or {})
         context = ops.queue_context()
         _observed = {"session": connection.session, "context": context}
@@ -292,13 +366,19 @@ def call(operation, params=None, timeout=30):
             _observed = None
             if isinstance(result, dict):
                 result = dict(result, transport_warning=_JOURNAL_WARNING)
+        if note and isinstance(result, dict):
+            result = dict(result, transport_note=note)
     except _WireFailure as exc:
-        _observed = None
+        # An uncertain edit needs fresh inspection. A read, or a failure before dispatch, changed nothing.
+        if dispatched and operation not in QUEUE_READ_ONLY:
+            _observed = None
         if record is not None:
             data.update(state="unknown", error=str(exc))
             _write_terminal_record(record, data)
-        raise client.BridgeCallError("%s Request record: %s. No automatic replay or Python fallback was sent."
-                                     % (exc, record or "dispatch not started")) from exc
+        detail = ("Request record: %s. No automatic replay or Python fallback was sent." % record if record else
+                  "Request record: dispatch not started; %s. No automatic replay or Python fallback was sent."
+                  % NOT_DISPATCHED)
+        raise client.BridgeCallError("%s %s" % (exc, detail)) from exc
     except Exception as exc:
         if record is not None:
             data.update(state="failed", error=str(exc))
@@ -318,3 +398,8 @@ def call(operation, params=None, timeout=30):
                     result = dict(result, transport_warning=f"{warning} {_FINISH_WARNING}" if warning else _FINISH_WARNING)
         lock.release()
     return result
+
+
+def _describe(context):
+    context = context or {}
+    return "project %s, timeline %s" % (context.get("project_id") or "none", context.get("timeline_id") or "none")

@@ -18,6 +18,39 @@ _WINDOWS = os.name == "nt"
 _REPLACE_RETRY_SECONDS = 0.5
 
 
+# Mac App Store builds of Resolve are sandboxed: Resolve can only read and write
+# inside its own container, and its HOME is the container's Data folder. The
+# runtime lives there so the native-file Lua worker and the MCP server meet.
+APP_STORE_RESOLVE_IDS = ("com.blackmagic-design.DaVinciResolveLite",
+                         "com.blackmagic-design.DaVinciResolveApp",
+                         "com.blackmagic-design.DaVinciResolveStudio")
+
+
+def app_store_container(home=None):
+    """Return the sandboxed App Store Resolve's container Data folder, if installed."""
+    if sys.platform != "darwin":
+        return None
+    home = Path(home or Path.home())
+    if "/Library/Containers/" in str(home):  # Already inside a sandbox (e.g. Resolve itself).
+        return None
+    for bundle in APP_STORE_RESOLVE_IDS:
+        data = home / "Library" / "Containers" / bundle / "Data"
+        if data.is_dir():
+            return data
+    return None
+
+
+def default_home(home=None):
+    """The bridge runtime folder: $RESOLVE_AI_BRIDGE_HOME, the App Store sandbox, or ~/.resolve-ai-bridge."""
+    configured = os.environ.get("RESOLVE_AI_BRIDGE_HOME")
+    if configured:
+        return Path(configured).expanduser()
+    container = app_store_container(home)
+    if container is not None:
+        return container / ".resolve-ai-bridge"
+    return Path(home or Path.home()) / ".resolve-ai-bridge"
+
+
 def private_directory(path):
     """Keep local requests and their authentication material owner-only."""
     path = Path(path)

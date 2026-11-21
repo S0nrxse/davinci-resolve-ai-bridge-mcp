@@ -42,3 +42,14 @@ Run the doctor check after changes. Keep README.md and documentation in agreemen
 - Do not overwrite malformed client configs. Back up valid configs before atomic merges.
 - Run `python3 -m unittest discover -s tests -v` and `node tools/check-package.mjs` for relevant changes, plus the doctor after installation.
 - Follow docs/RELEASING.md when publishing is explicitly requested. Do not choose a release tag/version on behalf of a maintainer who is handling that separately.
+
+## Chat panel rules
+
+- `chat/` is the chat panel: `server.py` (stdlib HTTP + SSE), `agents.py` (Claude Code / Codex adapters),
+  `ui/` (React source, built with `npm run build:chat` into the committed `chat/dist/index.html`) and
+  `macos/` (the Swift panel app built by the installer). See docs/CHAT.md.
+- `chat/` must stay standard library only and must never import Resolve; it reaches Resolve only through
+  `bridge.transport` (read-only `current_context` / `timeline_overview`) or the agent's MCP tools.
+- Keep the server bound to 127.0.0.1 with the per-launch token plus the Host/Origin checks.
+- Edits go through the agent's approval flow. Only read-only bridge tools may skip approval in Ask mode.
+- Rebuild `chat/dist/index.html` after UI changes and run `python3 -m unittest tests.test_chat`.
