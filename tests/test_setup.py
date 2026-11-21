@@ -168,3 +168,28 @@ class SetupTests(unittest.TestCase):
     def test_python_sources_compile(self):
         for p in list((ROOT/'bridge').glob('*.py'))+list((ROOT/'agent').rglob('*.py'))+[ROOT/'install.py']:
             compile(p.read_text(),str(p),'exec')
+
+
+class AppStoreSandboxTest(unittest.TestCase):
+    """The sandboxed Mac App Store Resolve can only reach its own container."""
+
+    def test_default_home_uses_app_store_container(self):
+        import tempfile
+        from unittest import mock
+        from bridge import lifecycle
+        with tempfile.TemporaryDirectory() as home, mock.patch.object(lifecycle.sys, "platform", "darwin"), \
+                mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("RESOLVE_AI_BRIDGE_HOME", None)
+            self.assertEqual(lifecycle.default_home(home), Path(home) / ".resolve-ai-bridge")
+            data = Path(home) / "Library/Containers/com.blackmagic-design.DaVinciResolveLite/Data"
+            data.mkdir(parents=True)
+            self.assertEqual(lifecycle.default_home(home), data / ".resolve-ai-bridge")
+            os.environ["RESOLVE_AI_BRIDGE_HOME"] = "/custom/home"
+            self.assertEqual(lifecycle.default_home(home), Path("/custom/home"))
+
+    def test_inside_sandbox_keeps_its_own_home(self):
+        from unittest import mock
+        from bridge import lifecycle
+        sandboxed = "/Users/x/Library/Containers/com.blackmagic-design.DaVinciResolveLite/Data"
+        with mock.patch.object(lifecycle.sys, "platform", "darwin"):
+            self.assertIsNone(lifecycle.app_store_container(sandboxed))

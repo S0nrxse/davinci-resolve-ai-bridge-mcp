@@ -198,6 +198,16 @@ Malformed JSON or an unexpected structure is preserved rather than overwritten. 
 
 Do not repeat an edit after a client timeout or direct-dispatch connection failure. A native operation may already have applied it or may still be running. The timeout includes the queue request ID; inspect `requests/<id>.json` under the runtime and fresh Resolve state. `running` after a crash is uncertain, not confirmed cancellation. `failed` can include partial edits: inspect the error and timeline. A heartbeat's `busy`/`state` fields describe the worker, while project/timeline details remain cached during jobs. Expired work is rejected before dispatch. Session/context errors require restarting outdated workers or inspecting the intended timeline before submitting a new request.
 
+What the "stale" rejections are, and what now recovers by itself:
+
+- **"Inspect … before editing; this client has no current observation"**: the MCP process is new, or its last edit had an uncertain outcome. Inspect first. A failed or timed-out *read* (for example a slow `inspect_fusion` on a big comp) no longer clears the observation.
+- **Worker restarted** (Stop/Start, or Resolve restarted the worker) with the same project and timeline open: the client re-observes and the edit goes ahead with a `transport_note`. With another timeline open it is refused, naming both.
+- **"The open project/timeline changed"**: someone switched timelines since this client looked. Refused before dispatch; inspect, then submit again.
+- **`stale_request`, `expired` or `session_changed` from the Lua worker** at the start of an operation (Resolve stalled for a minute, for example): retried once automatically, because the worker proved it ran nothing. A second refusal says "no new operation started".
+- **Parallel calls**: calls in one MCP process queue one at a time. Waiting for another client's operation has its own budget (`RESOLVE_AI_BRIDGE_LOCK_WAIT_SECONDS`, default 180 s) and no longer eats the operation's own timeout. If the Lua heartbeat is briefly silent (a long native call, or a restart), a process that used it in the last 15 minutes waits up to 20 s for it before reporting offline.
+
+Anything that may have reached dispatch is still never retried.
+
 ## Interrupted installation or rollback
 
 Quit MCP clients and use **Stop AI Bridge (Lua)** or **Stop AI Bridge** before updating, uninstalling, or recovering. Let any active operation finish first. A fresh worker heartbeat or held operation lock blocks setup and uninstall.
@@ -205,3 +215,19 @@ Quit MCP clients and use **Stop AI Bridge (Lua)** or **Stop AI Bridge** before u
 If the installer was killed, first verify no install or uninstall process remains, then remove the sibling `.resolve-ai-bridge.install-lock` directory and rerun installation. If the runtime is missing, the installer restores `.resolve-ai-bridge.previous` before staging again. For manual rollback, move the current runtime aside and rename `.resolve-ai-bridge.previous` to `.resolve-ai-bridge`. Retain both directories until verified. Earlier backups have timestamp suffixes. Abandoned `.stage-*` directories can be removed after recovery.
 
 The private environment is invoked through its Python executable (`python -m pip` for maintenance); generated standalone dependency scripts can retain staging paths. Stop/restart clients and the Console worker after activation. `--skip-deps` is for file/setup diagnostics, not a verified usable MCP installation. Client/menu setup failures after activation do not roll back runtime files; rerun setup. Use `python3 tools/doctor.py --offline` to avoid all Resolve calls.
+
+## Mac App Store Resolve: the Resolve AI Bridge menu is missing
+
+The Mac App Store build of Resolve (`com.blackmagic-design.DaVinciResolveLite`) is sandboxed. It reads
+scripts only from its own container and can't open files outside it. When the installer finds that
+container, it puts the runtime in
+`~/Library/Containers/com.blackmagic-design.DaVinciResolveLite/Data/.resolve-ai-bridge` and the menu
+entries in that container's `Library/Application Support/Fusion/Scripts/Utility`. Rerun the installer
+after switching to the App Store build, then quit and reopen Resolve. If Claude Code was configured
+earlier, refresh its entry:
+`claude mcp remove resolve-ai-bridge --scope user`, then the `claude mcp add-json` line the installer
+prints. Not yet live-tested: the native-file Lua worker running inside the sandbox.
+
+## A Fusion effect is reported as applied but does not show
+
+Bridge versions before this fix edited comps outside a Fusion undo group. Resolve 21.2 Free kept those edits in the comp but the viewer and Deliver renders kept the old picture. Update the bridge, then re-run the effect (or make any small change to the comp on the Fusion page); the comp is re-read once it is marked modified. Check the result with `render_frames`, which shows the rendered picture rather than the comp's structure.

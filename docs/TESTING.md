@@ -67,6 +67,21 @@ Use a disposable project/timeline with short media. Start the Console worker, th
 
 Record Resolve version, edition, OS, decoder, result, and limitations in the release notes. A passing mock test is not a claim of live Free-version validation.
 
+## Agent-feedback regressions and live probes
+
+`tests/test_agent_feedback.py` covers problems an agent hit on a real Resolve 21.2 Free project, against fakes:
+Merge image inputs that Fusion's `GetInput` reports as nil, re-keying, merging into and clearing animated inputs,
+`fusion_run_lua` binding `comp` and the wrong-comp guard (with the node-handle fallback for `fusion_build` and
+`fusion_keyframe_input`), file Loaders converted on paste, `resolve_api` indexing of Lua arrays, per-clip carry-over
+in rebuilds, and the Lua transport's reconnect, pre-dispatch retry, read-failure and lock-wait rules.
+`tests/test_phase2_tools.py`, `test_preferences.py`, `test_fusion_graph.py`, `test_contact_sheet.py`, `test_tighten.py` and `test_resolve_api_ergonomics.py` cover the phase-2 tools (transitions kept out of clip lists, edit_points, batch setters, diff_since, insert_clip, create_timeline, the Agent Work bin, preferences, fusion_graph / fusion_copy_comp, the contact sheet, tighten and resolve_api options). `tests/test_media_search.py` covers `list_media` query/kind filtering and `speech_regions` word output modes. `tests/test_in_place_edits.py` covers `trim_in_place`, `set_clip_length`, `set_clip_volume`, still length via media marks and `add_transitions` (a fake that exports and imports FCPXML the way Resolve 21.2 Free did in the live probes). `tests/test_render_frames.py` and `tests/test_audio_regions.py` cover `render_frames`, `speech_regions` and
+`measure_loudness` with fakes, synthetic WAVs and real ffmpeg where installed. None of this has run on a live Resolve.
+
+`tools/probes/live_probes.py` probes unverified API calls one per invocation on a **scratch project only**
+(`--list`, `--plan NAME` offline; `--run NAME --scratch-project "<exact name>"` live, refused unless the open project
+has that name and it contains "scratch" or "probe"). It creates its own timelines, never deletes anything, and
+restores the open timeline and media pool folder. Read its module docstring before running it.
+
 ## Reliability regressions
 
 `tests/test_reliability.py` uses mocks and temporary runtime directories: no native Resolve imports or live project edits. It covers uncertain direct dispatch, safe pre-dispatch fallback, deadline rejection, context changes, concurrent clients, duplicate records, busy heartbeat/client timeout and installer failure/interruption. Run the full unittest suite and npm package/build checks. Doctor `--offline` checks installation without contacting Resolve.

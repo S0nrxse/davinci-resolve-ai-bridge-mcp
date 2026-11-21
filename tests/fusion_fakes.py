@@ -24,14 +24,22 @@ INPUTS = {
     "DirectionalBlur": ("Input", "Length", "EffectMask"),
     "BrightnessContrast": ("Input", "Gain", "Saturation", "EffectMask"),
     "ColorCorrector": ("Input", "MasterSaturation", "WheelTintAngle1", "WheelTintLength1", "MasterRGBGain", "EffectMask"),
-    "Merge": ("Background", "Foreground", "EffectMask"),
+    "Merge": ("Background", "Foreground", "Blend", "Center", "EffectMask"),
+    "Background": ("TopLeftRed", "TopLeftAlpha", "EffectMask"),
+    "TextPlus": ("StyledText", "Size", "Center", "EffectMask"),
     "EllipseMask": ("Width", "Height", "Center", "SoftEdge", "EffectMask"),
     "RectangleMask": ("Width", "Height", "Center", "SoftEdge", "CornerRadius", "EffectMask"),
     "Glow": ("Input", "Glow", "EffectMask"),
     "TimeSpeed": ("Input", "Speed"),
     "XYPath": ("X", "Y"),
+    "Loader": ("Clip", "EffectMask"),
+    "PolyPath": ("Displacement",),
 }
-DEFAULTS = {"Size": 1.0, "Center": (0.5, 0.5), "Gain": 1.0, "Saturation": 1.0, "Width": 0.5, "Height": 0.5}
+# Fusion's GetInput returns nil for image inputs (unconnected or not), unlike value inputs.
+IMAGE_INPUTS = {"Input", "Background", "Foreground", "EffectMask"}
+DEFAULTS = {"Size": 1.0, "Center": (0.5, 0.5), "Gain": 1.0, "Saturation": 1.0, "Width": 0.5, "Height": 0.5,
+            "Blend": 1.0, "StyledText": ""}
+NO_MAIN_INPUT = {"Background", "TextPlus", "EllipseMask", "RectangleMask", "XYPath"}
 
 
 class Output:
@@ -40,6 +48,18 @@ class Output:
 
     def GetTool(self):
         return self.tool
+
+
+class Modifier:
+    """A BezierSpline feeding an input. Like Fusion, it hangs off the input but is not a node in the flow."""
+
+    def __init__(self, reg_id="BezierSpline"):
+        self.reg_id, self.Name = reg_id, reg_id
+        self.main_output = Output(self)
+
+    def GetAttrs(self, key=None):
+        attrs = {"TOOLS_RegID": self.reg_id, "TOOLS_Name": self.Name}
+        return attrs.get(key) if key else attrs
 
 
 class Input:
@@ -58,7 +78,10 @@ class Input:
         return True
 
     def GetAttrs(self, key=None):
-        return self.id if key == "INPS_ID" else {"INPS_ID": self.id}
+        kind = ("Mask" if self.id == "EffectMask" else "Image" if self.id in IMAGE_INPUTS else
+                "Point" if self.id == "Center" else "Text" if self.id in ("StyledText", "Clip") else "Number")
+        attrs = {"INPS_ID": self.id, "INPS_DataType": kind}
+        return attrs.get(key) if key else attrs
 
     def at(self, time):
         if self.path is not None:
@@ -105,7 +128,7 @@ class Tool:
 
     def FindMainInput(self, index):
         names = INPUTS[self.reg_id]
-        return self.inputs[names[0]] if names and names[0] != "Width" else None
+        return self.inputs[names[0]] if names and self.reg_id not in NO_MAIN_INPUT else None
 
     def FindMainOutput(self, index):
         return self.main_output
@@ -126,7 +149,9 @@ class Tool:
 
     def GetInput(self, name, time=None):
         inp = self.inputs.get(name)
-        return None if inp is None else inp.at(time if time is not None else self.comp.time)
+        if inp is None or name in IMAGE_INPUTS:
+            return None
+        return inp.at(time if time is not None else self.comp.time)
 
     def SetInput(self, name, value, time=None):
         inp = self.inputs.get(name)
@@ -143,7 +168,8 @@ class Tool:
         if inp is None:
             return False
         if kind == "BezierSpline":
-            inp.keys = {}
+            inp.keys, inp.path = {}, None
+            inp.source = Modifier().main_output
         elif kind == "XYPath":
             inp.path = self.comp.AddTool(kind)
             inp.source = inp.path.main_output
@@ -206,6 +232,13 @@ class Comp:
     def Unlock(self):
         self.locks -= 1
 
+    def StartUndo(self, name):
+        self.undo_depth = getattr(self, "undo_depth", 0) + 1
+
+    def EndUndo(self, keep):
+        self.undo_depth -= 1
+        self.undo_groups = getattr(self, "undo_groups", 0) + (1 if keep else 0)
+
     def Execute(self, script):
         self.scripts.append(script)
         if self.fail_lua:
@@ -251,13 +284,16 @@ class Sim:
     def set_data(self, key, value):
         self.comp.SetData(key, value)
 
+    def get_data(self, key):
+        return self.comp.GetData(key)
+
     def connect(self, tool, name, target):
         self.input(tool, name)
         tool.ConnectInput(name, target)
 
     def animate(self, tool, name):
         inp = self.input(tool, name)
-        inp.keys, inp.path, inp.source = {}, None, None
+        inp.keys, inp.path, inp.source = {}, None, Modifier().main_output
 
     def xypath(self, tool, name):
         inp = self.input(tool, name)
@@ -274,7 +310,7 @@ class Sim:
         inp.keys[float(time)] = float(value)
 
     def set_value(self, tool, name, value):
-        self.input(tool, name).value = float(value)
+        self.input(tool, name).value = value if isinstance(value, str) else float(value)
 
     def point(self, tool, name, x, y):
         self.input(tool, name).value = (float(x), float(y))
@@ -319,5 +355,45 @@ end
 comp = {
   FindTool = function(_, name) return wrap(sim.find(name)) end,
   SetData = function(_, key, value) sim.set_data(key, value) end,
+  GetData = function(_, key) return sim.get_data(key) end,
 }
 """
+
+
+def comp_text(comp, media_path="/media/clip.mov"):
+    """A small .comp text in ExportFusionComp's shape (tools only, no wiring).
+
+    Like Resolve's export, the clip's MediaIn is written as a Loader carrying MediaProps; a real file
+    Loader keeps its Clip Filename.
+    """
+    lines = ["Composition {", "\tTools = ordered() {"]
+    for tool in comp.tools:
+        if tool.reg_id == "MediaIn":
+            lines.append('\t\t%s = Loader { CustomData = { MediaProps = { MEDIA_PATH = "%s" } }, '
+                         'Clips = { Clip { Filename = "%s" } } },' % (tool.Name, media_path, media_path))
+        elif tool.reg_id == "Loader":
+            lines.append('\t\t%s = Loader { Clips = { Clip { ID = "Clip1", Filename = "%s" } } },'
+                         % (tool.Name, tool.inputs["Clip"].value))
+        else:
+            lines.append("\t\t%s = %s { },"% (tool.Name, tool.reg_id))
+    return "\n".join(lines + ["\t}", "}"]) + "\n"
+
+
+def comp_from_text(text, convert_loaders=False):
+    """Rebuild a Comp from comp_text output. ``convert_loaders`` turns file Loaders into MediaIns, as Resolve
+    21.2 Free did on ImportFusionComp (GetInput("Clip") then read nil)."""
+    import re
+    comp = Comp()
+    for name, reg_id, body in re.findall(r"^\s*(\w+) = (\w+) \{(.*)\},?$", text, re.M):
+        if comp.FindTool(name) is not None:
+            continue
+        if reg_id == "Loader":
+            reg_id = "MediaIn" if "MediaProps" in body or convert_loaders else "Loader"
+        tool = comp.AddTool(reg_id)
+        if tool is None:
+            continue
+        tool.Name = name
+        found = re.search(r'Filename = "([^"]*)"', body)
+        if reg_id == "Loader" and found:
+            tool.inputs["Clip"].value = found.group(1)
+    return comp

@@ -19,13 +19,22 @@
     "install.ps1",
     "README.md",
     "LICENSE",
-    "requirements.txt"
+    "requirements.txt",
+    "chat/__init__.py",
+    "chat/agents.py",
+    "chat/changes.py",
+    "chat/server.py",
+    "chat/dist",
+    "chat/macos",
+    "chat/skills"
   ],
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "test": "python3 -m unittest discover -s tests -v"
+    "test": "python3 -m unittest discover -s tests -v",
+    "dev:chat": "vite --config chat/ui/vite.config.ts",
+    "build:chat": "vite build --config chat/ui/vite.config.ts"
   },
   "keywords": [
     "mcp",

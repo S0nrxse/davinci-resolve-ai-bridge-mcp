@@ -339,7 +339,35 @@ end
 
 function Ops:op_health()
  return json.object({connected=true,session=self.session,version=self.resolve:GetVersionString(),
-                     busy=self.transaction~=nil})
+                     busy=self.transaction~=nil,timeline_snapshot=true})
+end
+
+-- Read-only: the current timeline's clip layout in one round trip (instead of one RPC per property),
+-- so the chat panel can notice edits made by hand between messages. It calls only getters.
+function Ops:op_timeline_snapshot(arguments)
+  local tl = self:named_root("current_timeline")
+  local limit = tonumber(arguments and arguments.max_items) or 3000
+  if limit < 1 then limit = 1 elseif limit > 5000 then limit = 5000 end
+  local items, count, capped = {}, 0, false
+  for _, kind in ipairs({"video", "audio", "subtitle"}) do
+    local tracks = tonumber(call_ok(tl, "GetTrackCount", kind)) or 0
+    for t = 1, tracks do
+      local list = call_ok(tl, "GetItemListInTrack", kind, t)
+      if type(list) == "table" then
+        for _, item in ipairs(list) do
+          if count >= limit then capped = true; break end
+          count = count + 1
+          items[count] = json.object({
+            id = call_ok(item, "GetUniqueId"), name = call_ok(item, "GetName"),
+            track = string.upper(kind:sub(1, 1)) .. tostring(t),
+            start = call_ok(item, "GetStart"), ["end"] = call_ok(item, "GetEnd"),
+            offset = call_ok(item, "GetLeftOffset")})
+        end
+      end
+    end
+  end
+  -- Not "truncated": the Python transport reserves that key for incomplete replies.
+  return json.object({items = json.array(items), capped = capped})
 end
 
 function Ops:expire_operation(now)
@@ -379,6 +407,7 @@ function Ops:dispatch(op,args)
  if op=="call" then return self:op_call(args) end
  if op=="get_attribute" then return self:op_get_attribute(args) end
  if op=="release_handles" then return self:op_release_handles(args) end
+ if op=="timeline_snapshot" then return self:op_timeline_snapshot(args) end
  error(op_error("operation_not_allowed","Unknown RPC operation"),0)
 end
 local function node_get(obj_node, key)

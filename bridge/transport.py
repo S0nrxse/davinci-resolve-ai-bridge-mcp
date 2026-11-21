@@ -22,6 +22,7 @@ Set ``RESOLVE_AI_BRIDGE_MODE`` to ``direct``, ``console``, ``lua`` or ``auto``
 """
 
 import os
+import threading
 import time
 
 from bridge import client, direct, lua_transport
@@ -30,7 +31,32 @@ from bridge.operations import OperationError, ResolveOperations
 
 RETRY_SECONDS = 30.0
 
-_state = {"ops": None, "last_probe": 0.0}
+_state = {"ops": None, "last_probe": 0.0, "lua_seen": 0.0}
+# One Resolve operation at a time per process: concurrent tool calls (MCP threads, chat panel handlers)
+# queue here in arrival order instead of racing for the worker lease and timing out.
+_CALL_LOCK = threading.RLock()  # Re-entrant: a nested call from the same thread must not deadlock.
+LUA_RECONNECT_SECONDS = 20.0  # How long to wait for a Lua heartbeat this process saw recently.
+LUA_RECENT_SECONDS = 900.0
+
+
+def _lua_probe(selected_mode):
+    """Lua heartbeat; if this process used the Lua worker recently and it is briefly silent (a long native
+    call pauses its heartbeat, or it is restarting), wait a little for it rather than falling through."""
+    lua = lua_transport.probe()
+    if lua.get("connected"):
+        _state["lua_seen"] = time.monotonic()
+        return lua
+    seen = _state["lua_seen"]
+    if not seen or time.monotonic() - seen > LUA_RECENT_SECONDS:
+        return lua
+    deadline = time.monotonic() + LUA_RECONNECT_SECONDS
+    while time.monotonic() < deadline:
+        time.sleep(0.5)
+        lua = lua_transport.probe()
+        if lua.get("connected"):
+            _state["lua_seen"] = time.monotonic()
+            return dict(lua, reconnected=True)
+    return lua
 
 
 def mode():
@@ -67,7 +93,7 @@ def direct_operations(force=False):
 
     if direct.attach() is None:
         return None
-    _state["ops"] = ResolveOperations(direct.attach, _token_id(), "direct")
+    _state["ops"] = ResolveOperations(direct.attach, _token_id(), "direct", runtime_home=client.HOME)
     return _state["ops"]
 
 
@@ -102,9 +128,14 @@ def describe():
 
 
 def call(operation, params=None, timeout=30.0):
-    """Run one operation over whichever transport is available."""
+    """Run one operation over whichever transport is available, one at a time per process."""
+    with _CALL_LOCK:
+        return _call(operation, params, timeout)
+
+
+def _call(operation, params=None, timeout=30.0):
     selected_mode = mode()
-    lua = lua_transport.probe() if selected_mode in ("auto", "lua") else {}
+    lua = _lua_probe(selected_mode) if selected_mode in ("auto", "lua") else {}
     if lua.get("connected"):
         # Never fall through after Lua dispatch: an uncertain edit is not replayed.
         return lua_transport.call(operation, params or {}, timeout=timeout), "lua"

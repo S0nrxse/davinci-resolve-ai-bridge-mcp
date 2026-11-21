@@ -1,0 +1,1046 @@
+@import "tailwindcss";
+
+/*
+ * The cabin at night: fog, fine rain and one warm window behind the glass, and on the glass a single sheet of type.
+ * One surface: no cards, no boxes inside boxes. Hierarchy is set with type (two sizes, three weights, four greys) and
+ * space; hairlines only where a page would have a rule. The warm window light is the one accent, kept for the next
+ * action and the current selection. Colour inside the log only says something (Fusion, waiting, failed).
+ */
+@theme {
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+  --font-display: var(--font-sans);
+  --radius-sm: 5px;
+  --radius-md: 8px;
+  --radius-lg: 10px;
+  --radius-xl: 12px;
+  --radius-2xl: 14px;
+  --radius-glyph: 6px;
+
+  --color-well: #050608;
+  --color-base: #08090c;
+  --color-panel: #0d0f12;
+  --color-raised: #14161a;
+  --color-raised-2: #1a1d22;
+  --color-line: #1a1d22;
+  --color-line-2: #23272d;
+  --color-line-3: #363b43;
+  --color-scroll: #2c3037;
+
+  --color-ink: #d6d8dc;
+  --color-ink-strong: #eceef1;
+  --color-muted: #a0a5ad;
+  --color-faint: #878c94;
+
+  --color-accent: #ead9ae;
+  --color-accent-hi: #f3e6c4;
+  --color-accent-ink: #1c170b;
+  --color-live: #d4685c;
+  --color-ok: #9cbf8f;
+  --color-warn: #d8b56a;
+  --color-err: #d97a6c;
+
+  --color-json-key: #c9c1a6;
+  --color-json-str: #a8bf9a;
+  --color-json-lit: #d9b97a;
+
+  /* Fusion node tints, desaturated to sit in the night */
+  --color-node-io: #5a6068;
+  --color-node-xf: #8fa3b8;
+  --color-node-merge: #b8946a;
+  --color-node-filter: #8aa882;
+  --color-node-mask: #a395c4;
+  --color-node-gen: #7fa7a8;
+  --color-node-text: #c08a7c;
+  --color-node-color: #bfa86a;
+}
+
+.t-title {
+  font-weight: 600;
+  letter-spacing: -0.005em;
+}
+.t-display {
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--color-ink-strong);
+}
+.t-tc {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--color-ink-strong);
+}
+.t-label {
+  font-size: 11.5px;
+  font-weight: 500;
+}
+/* A small, gently rounded tag on a soft fill (copy, Demo). */
+.tag {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 7px;
+  border-radius: 5px;
+  background: color-mix(in oklab, currentColor 12%, transparent);
+  font: 500 11px/1 var(--font-sans);
+}
+/* A quiet key hint: no box, just a softly filled glyph. */
+.kc {
+  display: inline-flex;
+  align-items: center;
+  height: 17px;
+  min-width: 17px;
+  justify-content: center;
+  padding: 0 4px;
+  border-radius: 4px;
+  background: rgb(255 255 255 / 0.06);
+  font: 500 10.5px/1 var(--font-sans);
+  color: var(--color-faint);
+}
+
+/* ------------------------------------------------------------------ the night outside */
+
+/* The sky: blue-grey fog glowing at the top, falling into the dark of the trees, and a lens vignette. */
+.t-app {
+  isolation: isolate;
+  --fog: 150 160 176;
+  background:
+    radial-gradient(140% 60% at 50% -18%, rgb(var(--fog) / 0.22), rgb(var(--fog) / 0.1) 40%, rgb(var(--fog) / 0.03) 70%, transparent 92%),
+    linear-gradient(var(--color-base), var(--color-base) 45%, var(--color-well));
+}
+.t-app::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  box-shadow: inset 0 0 140px 20px rgb(0 0 0 / 0.7);
+}
+.night-air {
+  position: absolute;
+  inset: 0;
+  z-index: -2;
+  /* clip, not hidden: nothing here may ever become programmatically scrollable. */
+  overflow: clip;
+  pointer-events: none;
+}
+
+/*
+ * Fine rain over the whole panel: hairline streaks (0.6px and 0.8px), short, at a 16° slant, at 7% and 10%
+ * opacity, dense enough to read as texture rather than drops. Unhurried: 3.4s and 2.5s per tile, slow enough not to shimmer. Each layer is one
+ * tile taller than the panel and moves exactly one tile per loop, so it never jumps.
+ */
+.cabin-rain {
+  position: absolute;
+  inset: 0;
+  overflow: clip;
+}
+.cabin-rain > div {
+  position: absolute;
+  inset: -15% -25%;
+  transform: rotate(-16deg);
+}
+.cabin-rain i {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  will-change: transform;
+}
+.cabin-rain .far {
+  top: -160px;
+  opacity: 0.07;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='120' height='160'><defs><linearGradient id='s' x1='0' y1='0' x2='0' y2='1'><stop offset='0' stop-color='%23e8e2d2' stop-opacity='0'/><stop offset='1' stop-color='%23e8e2d2' stop-opacity='.9'/></linearGradient></defs><rect x='6' y='4' width='0.6' height='18' fill='url(%23s)'/><rect x='31' y='70' width='0.6' height='14' fill='url(%23s)'/><rect x='52' y='22' width='0.6' height='24' fill='url(%23s)'/><rect x='77' y='110' width='0.6' height='16' fill='url(%23s)'/><rect x='96' y='48' width='0.6' height='20' fill='url(%23s)'/><rect x='14' y='124' width='0.6' height='22' fill='url(%23s)'/><rect x='64' y='140' width='0.6' height='15' fill='url(%23s)'/><rect x='110' y='6' width='0.6' height='14' fill='url(%23s)'/><rect x='42' y='96' width='0.6' height='18' fill='url(%23s)'/><rect x='88' y='0' width='0.6' height='12' fill='url(%23s)'/><rect x='24' y='40' width='0.6' height='16' fill='url(%23s)'/></svg>");
+  background-size: 120px 160px;
+  animation: cabin-far 3.4s linear infinite;
+}
+.cabin-rain .near {
+  top: -260px;
+  opacity: 0.1;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='200' height='260'><defs><linearGradient id='s' x1='0' y1='0' x2='0' y2='1'><stop offset='0' stop-color='%23e8e2d2' stop-opacity='0'/><stop offset='1' stop-color='%23e8e2d2' stop-opacity='.9'/></linearGradient></defs><rect x='18' y='10' width='0.8' height='40' fill='url(%23s)'/><rect x='92' y='120' width='0.8' height='32' fill='url(%23s)'/><rect x='150' y='36' width='0.8' height='38' fill='url(%23s)'/><rect x='60' y='200' width='0.8' height='34' fill='url(%23s)'/><rect x='178' y='170' width='0.8' height='28' fill='url(%23s)'/><rect x='120' y='230' width='0.8' height='26' fill='url(%23s)'/></svg>");
+  background-size: 200px 260px;
+  animation: cabin-near 2.5s linear infinite;
+}
+@keyframes cabin-far {
+  to {
+    transform: translateY(160px);
+  }
+}
+@keyframes cabin-near {
+  to {
+    transform: translateY(260px);
+  }
+}
+.night-air[data-off] .cabin-rain {
+  display: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .cabin-rain {
+    display: none;
+  }
+}
+
+/* Film grain over everything at 3.5%, held still: a jittering grain reads as flicker on a dark panel. */
+.grain {
+  position: absolute;
+  inset: -50%;
+  z-index: 70;
+  pointer-events: none;
+  opacity: 0.035;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 1.2 0'/></filter><rect width='160' height='160' filter='url(%23n)'/></svg>");
+  background-size: 160px 160px;
+  mix-blend-mode: overlay;
+}
+
+/*
+ * Depth of field without smearing text: the transcript fades out over its top and bottom 22px (an opacity mask on
+ * the scroller), so lines dissolve into the panel as they scroll away instead of being blurred.
+ */
+/*
+ * The conversation dissolves into the night at its top and bottom edges: an opacity mask on the scroller, so content
+ * fades into the one continuous background behind it. No band element, no blur rectangle, nothing with an edge.
+ * The padding matches the fades, so resting content is fully opaque.
+ */
+.t-stage {
+  /* Starts under the frosted top bar (its height is --top-h) and fades out only above the composer. */
+  padding-top: calc(var(--top-h, 44px) + 16px);
+  padding-bottom: 14px;
+  scroll-padding-top: calc(var(--top-h, 44px) + 8px);
+  -webkit-mask-image: linear-gradient(#000, #000 calc(100% - 34px), rgb(0 0 0 / 0.35) calc(100% - 12px), transparent);
+  mask-image: linear-gradient(#000, #000 calc(100% - 34px), rgb(0 0 0 / 0.35) calc(100% - 12px), transparent);
+}
+/*
+ * The top bar: a progressive blur. The conversation and the rain scroll under it and show through blurred and slightly dimmed, the blur
+ * and a soft wash of the night both strongest at the very top and easing to nothing just below the bar, so it
+ * has no edge anywhere.
+ */
+.t-topbar::before,
+.t-topbar::after {
+  content: "";
+  position: absolute;
+  /* Wider than the panel so the blur doesn't darken at the side edges (the app clips the overflow). */
+  inset: 0 -24px -10px;
+  pointer-events: none;
+  z-index: -1;
+}
+.t-topbar::before {
+  -webkit-backdrop-filter: blur(8px) brightness(0.82) saturate(1.1);
+  backdrop-filter: blur(8px) brightness(0.82) saturate(1.1);
+  -webkit-mask-image: linear-gradient(#000, #000 55%, rgb(0 0 0 / 0.5) 78%, transparent);
+  mask-image: linear-gradient(#000, #000 55%, rgb(0 0 0 / 0.5) 78%, transparent);
+}
+.t-topbar::after {
+  background: linear-gradient(
+    color-mix(in oklab, var(--color-base) 62%, transparent),
+    color-mix(in oklab, var(--color-base) 34%, transparent) 50%,
+    transparent
+  );
+}
+/* The header's menus stay solid. */
+.t-topbar .pop {
+  background: var(--color-raised);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+@media (prefers-reduced-transparency: reduce) {
+  .t-composer,
+  .pop {
+    -webkit-backdrop-filter: none !important;
+    backdrop-filter: none !important;
+  }
+  .t-topbar::before {
+    -webkit-backdrop-filter: none !important;
+    backdrop-filter: none !important;
+  }
+  .t-topbar::after {
+    background: linear-gradient(var(--color-base) 70%, transparent);
+  }
+}
+.t-header,
+.t-context {
+  background: transparent;
+}
+/* The composer: a softly rounded field of frosted fog over the rain. No glow, ever. */
+.t-composer {
+  border-color: rgb(255 255 255 / 0.07);
+  background: color-mix(in oklab, var(--color-raised) 80%, transparent);
+  -webkit-backdrop-filter: blur(16px) saturate(1.1);
+  backdrop-filter: blur(16px) saturate(1.1);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.04),
+    0 10px 30px -14px rgb(0 0 0 / 0.8);
+}
+/* No glow, halo or frame marks at any time: focus is only a barely brighter edge. */
+.t-composer:focus-within {
+  border-color: rgb(255 255 255 / 0.12);
+}
+/* Menus float in the fog: soft diffuse shadow and a little blur of what's behind. */
+.pop {
+  background: color-mix(in oklab, var(--color-raised) 92%, transparent);
+  -webkit-backdrop-filter: blur(14px) saturate(1.1);
+  backdrop-filter: blur(14px) saturate(1.1);
+}
+/* Inside the frosted composer a second backdrop blur can't see past it (it would show the transcript unblurred
+   through the menu), so the composer's menus are solid. */
+.t-composer .pop {
+  background: var(--color-raised);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
+:root {
+  color-scheme: dark;
+  /* One outer gutter for every edge of the panel: 18px at 340, 21.5px at 400, 24px from 445 up. */
+  --gutter: clamp(16px, 5.4vw, 24px);
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  /*
+   * A physical settle: a fast exponential approach with one 2.5% overshoot that eases home, never oscillating
+   * back below the target (so not a bounce). Menus opening, step glyphs landing, toggle knobs.
+   */
+  --ease-settle: linear(0, 0.08 3%, 0.28 8%, 0.6 16%, 0.84 25%, 0.96 34%, 1.015 43%, 1.025 52%, 1.015 64%, 1.004 80%, 1);
+  -webkit-font-smoothing: antialiased;
+  font-synthesis: none;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  background: var(--color-base);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.5;
+  overflow: hidden;
+}
+
+::selection {
+  background: color-mix(in oklab, var(--color-accent) 40%, transparent);
+  color: var(--color-ink-strong);
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-scroll) transparent;
+}
+
+/* In the base layer so utilities (e.g. the composer's outline-none) can override it. */
+@layer base {
+  :focus-visible {
+    outline: 1.5px solid color-mix(in oklab, var(--color-accent) 80%, transparent);
+    outline-offset: 2px;
+  }
+  textarea:focus-visible,
+  input:focus-visible {
+    outline: none;
+  }
+}
+
+/* The transcript's scrollbar appears only while it scrolls (App sets data-scrolling for a moment). */
+.t-stage {
+  scrollbar-color: transparent transparent;
+  transition: scrollbar-color 300ms ease-out;
+}
+.t-stage[data-scrolling] {
+  scrollbar-color: var(--color-scroll) transparent;
+}
+.t-stage::-webkit-scrollbar {
+  width: 8px;
+}
+.t-stage::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 8px;
+  background: transparent padding-box;
+}
+.t-stage[data-scrolling]::-webkit-scrollbar-thumb {
+  background-color: var(--color-scroll);
+}
+
+.no-scrollbar {
+  scrollbar-width: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+.tc {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+}
+
+/* Composer toolbar: icons only; if even that can't fit, the model name goes (see useToolbarFit). */
+.tb[data-fit~="1"] .tb-model-label {
+  display: none;
+}
+
+/*
+ * Tooltips: every icon-only control names itself on hover or keyboard focus after a short delay
+ * (native titles take a second and look like the OS, not the panel). Hidden while any menu is open.
+ */
+[data-tip] {
+  position: relative;
+}
+[data-tip]::after {
+  content: attr(data-tip);
+  position: absolute;
+  z-index: 60;
+  left: 50%;
+  bottom: calc(100% + 8px);
+  width: max-content;
+  max-width: min(220px, calc(100vw - 2 * var(--gutter)));
+  padding: 4px 8px;
+  border: 1px solid rgb(255 255 255 / 0.06);
+  border-radius: 8px;
+  background: var(--color-raised-2);
+  box-shadow: 0 8px 18px -10px rgb(0 0 0 / 0.8);
+  color: var(--color-ink-strong);
+  font: 500 11.5px/1.35 var(--font-sans);
+  letter-spacing: 0;
+  text-align: left;
+  white-space: normal;
+  pointer-events: none;
+  transform: translate(-50%, 0);
+  --tip-from: 0 3px;
+}
+/*
+ * A hidden tooltip takes no layout at all. (An invisible one still counts toward the transcript's scroll height:
+ * a long one under the last step, like a resolve_api call chain, left a big empty gap to scroll into.)
+ */
+[data-tip]:not([data-tip-on])::after {
+  display: none;
+}
+/* Shown only on the one control that owns the tooltip (useSingleTooltip): hover, or focus reached with Tab. */
+[data-tip-on]::after {
+  animation: tip-in 180ms var(--ease-out) 380ms backwards;
+}
+/* An ⓘ opened by click (never hover-only: the panel may not receive mouse-moved events) shows at once. */
+[data-tip-click][data-tip-on]::after {
+  animation-delay: 0ms;
+}
+@keyframes tip-in {
+  from {
+    opacity: 0;
+    translate: var(--tip-from);
+  }
+}
+[data-tip-mono]::after {
+  font: 400 11px/1.4 var(--font-mono);
+  max-width: min(280px, calc(100vw - 2 * var(--gutter)));
+  overflow-wrap: anywhere;
+}
+[data-tip-pos="below"]::after {
+  top: calc(100% + 8px);
+  bottom: auto;
+  --tip-from: 0 -3px;
+}
+[data-tip-align="start"]::after {
+  left: 0;
+  transform: none;
+}
+[data-tip-align="end"]::after {
+  left: auto;
+  right: 0;
+  transform: none;
+}
+body[data-popover] [data-tip]:not(.pop [data-tip])::after,
+[data-tip][aria-expanded="true"]::after {
+  display: none;
+}
+
+/* The reasoning slider: a native range input (drag, snap, arrow keys for free) drawn as a steel thumb over the
+ * track and stops rendered beside it. */
+.effort-range {
+  -webkit-appearance: none;
+  appearance: none;
+  margin: 0;
+  background: transparent;
+  cursor: pointer;
+}
+.effort-range::-webkit-slider-runnable-track {
+  height: 24px;
+  background: transparent;
+}
+.effort-range::-moz-range-track {
+  height: 24px;
+  background: transparent;
+}
+.effort-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  margin-top: 5px;
+  border-radius: 999px;
+  background: var(--color-accent);
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.5);
+  transition: transform 160ms var(--ease-out);
+}
+.effort-range::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--color-accent-hi);
+}
+.effort-range:active::-webkit-slider-thumb {
+  transform: scale(1.12);
+}
+.effort-range:focus-visible {
+  outline: none;
+}
+.effort-range:focus-visible::-webkit-slider-thumb {
+  box-shadow: 0 0 0 2px var(--color-base), 0 0 0 3.5px var(--color-accent);
+}
+
+/* Prose inside assistant replies */
+.prose-r p,
+.prose-r .md-block {
+  margin: 0 0 0.6em;
+}
+.prose-r p:last-child,
+.prose-r .md-block:last-child {
+  margin-bottom: 0;
+}
+.prose-r ul,
+.prose-r ol {
+  margin: 0.2em 0 0.6em;
+  padding-left: 1.15em;
+}
+.prose-r ul {
+  list-style: disc;
+}
+.prose-r ol {
+  list-style: decimal;
+}
+.prose-r li {
+  margin: 0.15em 0;
+  padding-left: 0.15em;
+}
+.prose-r li::marker {
+  color: var(--color-faint);
+}
+.prose-r strong {
+  color: var(--color-ink-strong);
+  font-weight: 600;
+}
+.prose-r code {
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono);
+  font-size: 0.86em;
+  background: rgb(255 255 255 / 0.06);
+  border-radius: 4px;
+  padding: 0.1em 0.35em;
+}
+.prose-r pre {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  background: color-mix(in oklab, var(--color-well) 80%, transparent);
+  border-radius: 6px;
+  padding: 9px 11px;
+  overflow-x: auto;
+  margin: 0.3em 0 0.7em;
+}
+.prose-r pre code {
+  background: none;
+  border: 0;
+  padding: 0;
+}
+.prose-r a {
+  color: var(--color-accent-hi);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/* Fusion chain wires draw in left to right, then keyframes land. */
+@keyframes wire {
+  from {
+    transform: scaleX(0);
+  }
+}
+.wire-draw {
+  transform-origin: left;
+  animation: wire 360ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+@keyframes key-in {
+  from {
+    opacity: 0.35;
+    scale: 0.55;
+  }
+  to {
+    opacity: 1;
+    scale: 1;
+  }
+}
+.key-in {
+  animation: key-in 360ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+/* Entrances start visible: a short settle, never a fade from nothing. */
+@keyframes rise {
+  from {
+    opacity: 0.55;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.rise {
+  animation: rise 240ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+/* Menus open fully opaque and spring out of their trigger's edge, so nothing reads through them mid-flight. */
+@keyframes pop {
+  from {
+    transform: translateY(var(--pop-y, 6px)) scale(0.96);
+  }
+  to {
+    transform: none;
+  }
+}
+.pop {
+  transform-origin: var(--pop-origin, bottom);
+  animation: pop 300ms var(--ease-settle) both;
+}
+
+@keyframes snap-in {
+  from {
+    opacity: 0.4;
+    transform: translateX(-10px);
+    clip-path: inset(0 75% 0 0);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+    clip-path: inset(0 0 0 0);
+  }
+}
+@keyframes glyph-land {
+  from {
+    transform: scale(0.55);
+  }
+  to {
+    transform: none;
+  }
+}
+/* "backwards": once landed, no transform or clip stays behind to trap focus rings or tooltips. */
+.snap-in {
+  animation: snap-in 380ms var(--ease-out) backwards;
+}
+.snap-in > button .step-glyph {
+  animation: glyph-land 460ms var(--ease-settle) 60ms backwards;
+}
+
+@keyframes bubble-in {
+  from {
+    opacity: 0.5;
+    transform: translateY(8px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.bubble-in {
+  transform-origin: bottom right;
+  animation: bubble-in 420ms var(--ease-settle) backwards;
+}
+
+@keyframes send-launch {
+  0% {
+    transform: none;
+    opacity: 1;
+  }
+  40% {
+    transform: translateY(-14px);
+    opacity: 0;
+  }
+  41% {
+    transform: translateY(12px);
+    opacity: 0;
+  }
+  100% {
+    transform: none;
+    opacity: 1;
+  }
+}
+.send-launch {
+  animation: send-launch 460ms var(--ease-out);
+}
+
+@keyframes caret {
+  50% {
+    opacity: 0;
+  }
+}
+.clamp-2,
+.clamp-3 {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.clamp-2 {
+  -webkit-line-clamp: 2;
+}
+.clamp-3 {
+  -webkit-line-clamp: 3;
+}
+
+/* A clamped thought fades out on its last line instead of cutting a word with an ellipsis. */
+.fade-last {
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 1.4em), transparent);
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 1.4em), transparent);
+}
+
+/* A one-line thought preview fades out at its end instead of cutting a word with an ellipsis. */
+.fade-right {
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 48px), transparent);
+  mask-image: linear-gradient(to right, #000 calc(100% - 48px), transparent);
+}
+
+.caret::after {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 13px;
+  margin-left: 2px;
+  vertical-align: -2px;
+  background: var(--color-accent);
+  animation: caret 1s steps(1) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wire-draw,
+  .key-in,
+  .rise,
+  .pop,
+  .caret::after,
+  .snap-in,
+  .snap-in > button .step-glyph,
+  .bubble-in,
+  .send-launch {
+    animation: none !important;
+  }
+  [data-tip]::after {
+    animation: none !important;
+  }
+}
+
+/*
+ * Seek links: timecodes and clip names the agent mentions. A dotted underline in the text's own colour; warm on hover
+ * or focus with a small playhead mark above the first character; one warm flash when Resolve has moved there.
+ */
+.seek {
+  position: relative;
+  display: inline;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: inherit;
+  cursor: pointer;
+  text-decoration: underline dotted;
+  text-decoration-color: color-mix(in oklab, currentColor 45%, transparent);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+  border-radius: 3px;
+  transition:
+    color 150ms ease-out,
+    text-decoration-color 150ms ease-out,
+    background-color 300ms ease-out;
+}
+.seek-code {
+  text-decoration: none;
+}
+.seek-code > code {
+  text-decoration: underline dotted;
+  text-decoration-color: color-mix(in oklab, currentColor 45%, transparent);
+  text-underline-offset: 3px;
+}
+.seek::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: -5px;
+  width: 7px;
+  height: 5px;
+  background: var(--color-accent);
+  clip-path: polygon(0 0, 100% 0, 100% 45%, 50% 100%, 0 45%);
+  opacity: 0;
+  transform: translateY(-2px);
+  transition:
+    opacity 150ms ease-out,
+    transform 200ms var(--ease-out);
+  pointer-events: none;
+}
+@media (hover: hover) {
+  .seek:hover {
+    color: var(--color-accent-hi);
+    text-decoration-color: var(--color-accent);
+  }
+  .seek:hover::before {
+    opacity: 1;
+    transform: none;
+  }
+}
+.seek:focus-visible {
+  color: var(--color-accent-hi);
+  outline-offset: 1px;
+}
+.seek:focus-visible::before {
+  opacity: 1;
+  transform: none;
+}
+.seek[data-state="busy"] {
+  cursor: progress;
+}
+.seek[data-state="ok"] {
+  animation: seek-flash 700ms var(--ease-out);
+}
+@keyframes seek-flash {
+  0% {
+    background-color: color-mix(in oklab, var(--color-accent) 28%, transparent);
+    color: var(--color-accent-hi);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .seek[data-state="ok"] {
+    animation: none;
+    color: var(--color-accent-hi);
+  }
+}
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* The lightbox: the image fit to the panel over the night, dimmed and blurred; a short fade and scale. */
+.lightbox {
+  background: color-mix(in oklab, var(--color-well) 78%, transparent);
+  -webkit-backdrop-filter: blur(14px) saturate(0.9);
+  backdrop-filter: blur(14px) saturate(0.9);
+  animation: lb-fade 180ms var(--ease-out) both;
+}
+.lightbox-img {
+  max-height: calc(100% - 40px);
+  animation: lb-zoom 200ms var(--ease-out) both;
+}
+.lightbox[data-phase="closing"] {
+  animation: lb-fade 160ms var(--ease-out) reverse both;
+}
+.lightbox[data-phase="closing"] .lightbox-img {
+  animation: lb-zoom-out 160ms var(--ease-out) both;
+}
+@keyframes lb-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes lb-zoom {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes lb-zoom-out {
+  to {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .lightbox,
+  .lightbox-img,
+  .lightbox[data-phase="closing"],
+  .lightbox[data-phase="closing"] .lightbox-img {
+    animation: none;
+  }
+}
+@media (prefers-reduced-transparency: reduce) {
+  .lightbox {
+    background: var(--color-well);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+}
+
+/*
+ * The log: one 24px line per step. A narrow margin holds the glyph; the label starts at the text edge of everything
+ * nested under it. The hover wash bleeds 6px past the column so the text itself never moves.
+ */
+:root {
+  --log-indent: 22px;
+}
+.log-row {
+  display: flex;
+  align-items: center;
+  width: calc(100% + 12px);
+  min-width: 0;
+  height: 24px;
+  margin: 0 -6px;
+  padding: 0 6px;
+  border-radius: 6px;
+  font-size: 12.5px;
+  text-align: left;
+  transition: background-color 150ms ease-out;
+}
+.log-row:hover,
+.log-row:focus-visible {
+  background: rgb(255 255 255 / 0.03);
+}
+.log-glyph {
+  display: grid;
+  flex: none;
+  place-items: center start;
+  width: var(--log-indent);
+}
+
+/*
+ * The editor's voice. Replies are neutral ink; the editor's own words are a warm ink (the window light mixed into
+ * the paper white) hung on a 1px warm rule in a 14px margin, like dialogue set apart from action lines. A steer sent
+ * mid-turn keeps the voice on a fainter rule. Skim a long chat by its rules.
+ */
+:root {
+  --you-indent: 14px;
+  --color-you: color-mix(in oklab, var(--color-ink-strong) 58%, var(--color-accent));
+}
+.you {
+  position: relative;
+  padding-left: var(--you-indent);
+}
+.you::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 3px;
+  bottom: 3px;
+  width: 1px;
+  border-radius: 1px;
+  background: color-mix(in oklab, var(--color-accent) 62%, transparent);
+}
+.you[data-steer]::before {
+  background: color-mix(in oklab, var(--color-accent) 30%, transparent);
+}
+.you-text {
+  color: var(--color-you);
+}
+
+/* GFM tables in replies: set like a table in a book. A rule under the header, faint rules between rows, no frame. */
+.prose-r .table-wrap {
+  margin: 0.5em 0 0.9em;
+  overflow-x: auto;
+}
+.prose-r table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+  line-height: 1.45;
+  font-variant-numeric: tabular-nums;
+}
+.prose-r th,
+.prose-r td {
+  padding: 5px 14px 5px 0;
+  white-space: nowrap;
+  text-align: left;
+}
+.prose-r th:last-child,
+.prose-r td:last-child {
+  padding-right: 0;
+}
+.prose-r th {
+  color: var(--color-faint);
+  font-weight: 500;
+  font-size: 11.5px;
+  border-bottom: 1px solid rgb(255 255 255 / 0.1);
+}
+.prose-r td {
+  border-bottom: 1px solid rgb(255 255 255 / 0.045);
+}
+.prose-r tr:last-child td {
+  border-bottom: 0;
+}
+
+/* Inline HTML the model may use (an allowlist; see markdown.tsx). */
+.prose-r kbd {
+  display: inline-block;
+  min-width: 1.5em;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: rgb(255 255 255 / 0.07);
+  font: 500 11px/1.6 var(--font-sans);
+  text-align: center;
+  color: var(--color-ink-strong);
+}
+.prose-r mark {
+  background: color-mix(in oklab, var(--color-accent) 22%, transparent);
+  color: var(--color-ink-strong);
+  border-radius: 3px;
+  padding: 0 2px;
+}
+.prose-r sub,
+.prose-r sup {
+  font-size: 0.72em;
+  line-height: 0;
+}
+.prose-r small {
+  font-size: 0.86em;
+  color: var(--color-muted);
+}
+.prose-r u {
+  text-underline-offset: 2px;
+}
+.prose-r s {
+  color: var(--color-muted);
+}
+.prose-r details {
+  margin: 0.3em 0 0.7em;
+}
+.prose-r summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: fit-content;
+  cursor: pointer;
+  list-style: none;
+  color: var(--color-muted);
+  font-size: 12.5px;
+}
+.prose-r summary::-webkit-details-marker {
+  display: none;
+}
+.prose-r summary::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  border-right: 1.3px solid currentColor;
+  border-bottom: 1.3px solid currentColor;
+  transform: rotate(-45deg);
+  transition: transform 200ms var(--ease-out);
+}
+.prose-r details[open] summary::before {
+  transform: rotate(45deg) translate(-1px, -1px);
+}
+.prose-r summary:hover {
+  color: var(--color-ink);
+}
+.prose-r details[open] summary {
+  margin-bottom: 4px;
+}
+.prose-r details > :not(summary) {
+  margin-left: 11px;
+}

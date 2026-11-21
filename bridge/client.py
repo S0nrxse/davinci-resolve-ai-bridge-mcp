@@ -11,7 +11,7 @@ from bridge import lifecycle
 from bridge.operations import QUEUE_READ_ONLY
 
 
-HOME = Path(os.environ.get("RESOLVE_AI_BRIDGE_HOME", Path.home() / ".resolve-ai-bridge")).expanduser()
+HOME = lifecycle.default_home()
 INBOX = HOME / "inbox"
 OUTBOX = HOME / "outbox"
 TOKEN_FILE = HOME / "token.txt"
@@ -104,6 +104,18 @@ def call(operation, params=None, timeout=30.0):
     if worker.get("queue_protocol") != 2:
         raise BridgeCallError("Restart the updated Console worker before sending requests.")
     observed = _observed
+    if operation not in QUEUE_READ_ONLY and observed and observed.get("session") != worker.get("session"):
+        # The worker restarted since this client looked. Re-observe with a read-only status call; if the same
+        # project and timeline are still open, the edit goes ahead under the new session. Nothing is dispatched
+        # until then, and the worker still checks the context itself before running the edit.
+        call("status", {}, timeout=min(float(timeout), 20.0))
+        refreshed = _observed
+        if not refreshed or refreshed.get("context") != observed.get("context"):
+            raise BridgeCallError("The Console worker restarted and the open project/timeline is no longer the one "
+                                  "this client inspected. Inspect timeline_overview before editing; context changed. "
+                                  "No edit was sent.")
+        observed = refreshed
+        worker = dict(worker, session=refreshed.get("session"))
     if operation not in QUEUE_READ_ONLY and (
         not observed or observed.get("session") != worker.get("session")
     ):
